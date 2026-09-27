@@ -35,7 +35,7 @@ log = logging.getLogger(__name__)
 #: order the editor shows them in.
 ROLES: tuple[tuple[str, str, str], ...] = (
     ("bg", "Background", "Behind everything"),
-    ("surface", "Panels", "Side bar, tab pages, cards"),
+    ("surface", "Panels", "Side bar, pages, cards"),
     ("raised", "Controls", "Buttons, fields, hovered rows"),
     ("hover", "Controls, hovered", "Buttons under the pointer"),
     ("border", "Lines", "Outlines and dividers"),
