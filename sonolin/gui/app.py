@@ -1,7 +1,7 @@
 """The desktop front end: PyQt6 widgets, no QML.
 
 Pick a speaker on the left, see and drive what it is playing in the card at the
-top, and work through the tabs for everything else.
+top, and pick everything else from the menu above the speakers.
 
 Nothing here talks to a speaker directly. Every call goes through `Controller`
 or the `Speaker` facade and runs on the thread pool via `workers.run`, because
@@ -23,12 +23,12 @@ import urllib.request
 from pathlib import Path
 
 from PyQt6.QtCore import QRectF, QSize, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QAction, QColor, QFont, QIcon, QPainter
+from PyQt6.QtGui import QAction, QColor, QFont, QIcon, QKeySequence, QPainter, QShortcut
 from PyQt6.QtWidgets import (
-    QApplication, QCheckBox, QHBoxLayout, QInputDialog, QLabel, QListWidget,
+    QApplication, QCheckBox, QFrame, QHBoxLayout, QInputDialog, QLabel, QListWidget,
     QListWidgetItem, QMainWindow, QMenu, QMessageBox, QProgressBar, QPushButton,
-    QSizePolicy, QSlider, QSplitter, QStatusBar, QStyle, QStyledItemDelegate,
-    QTabWidget, QToolBar, QVBoxLayout, QWidget,
+    QSlider, QSplitter, QStackedWidget, QStatusBar, QStyle,
+    QStyledItemDelegate, QToolButton, QVBoxLayout, QWidget,
 )
 
 from ..controller import Controller
@@ -37,14 +37,24 @@ from ..tags import Tags
 from . import style, themes, workers
 from .mpris import Mpris
 from .mpris import connect as connect_mpris
-from ..services import Services
+from ..services import Services, service_track
 from .browser import Browser
+from .nav import NavList
+from .nav import icon as nav_icon
 from .panels import (
     AlarmsTab, AnnouncePanel, DevicePanel, FavouritesTab, LibraryTab, LinkDialog,
     NowPlaying, QueueTab, SoundPanel, StreamPanel,
 )
 
 log = logging.getLogger(__name__)
+
+#: The pages, as the side bar lists them: (heading, [(name, icon), …]).
+PAGES = [
+    ("MUSIC", [("Queue", "queue"), ("Library", "library"), ("Browse", "browse"),
+               ("Favourites", "favourites")]),
+    ("SPEAKER", [("Sound", "sound"), ("Alarms", "alarms"), ("Announce", "announce"),
+                 ("Stream desktop", "stream"), ("Device", "device")]),
+]
 
 TICK_MS = 1000
 #: A full poll every this many ticks; the position is interpolated in between.
@@ -146,9 +156,10 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(QSize(980, 640))
         self.speaker_event.connect(self._on_speaker_event)
 
+        self._build_actions()
         self.setCentralWidget(self._build_body())
-        self.addToolBar(self._build_toolbar())
         self._build_statusbar()
+        self._show_mode()
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._tick)
@@ -186,6 +197,7 @@ class MainWindow(QMainWindow):
         sidebar = QWidget(); sidebar.setObjectName("sidebar")
         sidebar.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         sidebar.setMinimumWidth(230); sidebar.setMaximumWidth(320)
+        self.nav = NavList(PAGES)
         title = QLabel("SPEAKERS"); title.setObjectName("sidebarTitle")
         self.speakers = QListWidget(); self.speakers.setObjectName("speakerList")
         self.speakers.setItemDelegate(SpeakerDelegate(self.speakers))
@@ -193,14 +205,21 @@ class MainWindow(QMainWindow):
         self.speakers.currentRowChanged.connect(self._speaker_changed)
         self.speakers.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.speakers.customContextMenuRequested.connect(self._speaker_menu)
-        add_btn = QPushButton("+  Add speaker by address")
-        add_btn.clicked.connect(self._add_by_ip)
+        # The foot of the side bar: settings, and the light/dark switch.
+        self.settings_btn = QPushButton("Settings"); self.settings_btn.setObjectName("sidebarButton")
+        self.settings_btn.setToolTip("Find or add speakers, grouping, themes (Ctrl+,)")
+        self.settings_btn.clicked.connect(self._open_settings)
+        self.mode_btn = QToolButton(); self.mode_btn.setObjectName("sidebarButton")
+        self.mode_btn.setDefaultAction(self.mode_action)
+        self.mode_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
         slay = QVBoxLayout(sidebar)
         slay.setContentsMargins(0, 0, 0, 12)
+        slay.setSpacing(0)
+        slay.addWidget(self.nav)
         slay.addWidget(title)
         slay.addWidget(self.speakers, 1)
-        inner = QHBoxLayout(); inner.setContentsMargins(12, 0, 12, 0)
-        inner.addWidget(add_btn)
+        inner = QHBoxLayout(); inner.setContentsMargins(8, 6, 8, 0)
+        inner.addWidget(self.settings_btn, 1); inner.addWidget(self.mode_btn)
         slay.addLayout(inner)
 
         # now playing card + transport
@@ -238,8 +257,8 @@ class MainWindow(QMainWindow):
         self.group_vol = QCheckBox("Whole group")
         self.group_vol.setToolTip("Move every speaker in the group together, keeping their balance")
         self.group_vol.toggled.connect(lambda _v: self._poll(force=True))
-        vol_icon = QLabel("🔊"); vol_icon.setObjectName("timeLabel")
-        tl.addWidget(vol_icon); tl.addWidget(self.volume); tl.addWidget(self.vol_label)
+        self.volume.setToolTip("Volume")
+        tl.addWidget(self.volume); tl.addWidget(self.vol_label)
         tl.addWidget(self.mute); tl.addWidget(self.group_vol)
         tl.addStretch(1)
 
@@ -247,7 +266,7 @@ class MainWindow(QMainWindow):
         ul.setContentsMargins(16, 16, 16, 4)
         ul.addWidget(self.now); ul.addWidget(transport)
 
-        # tabs
+        # pages
         self.queue = QueueTab()
         self.queue.play_index.connect(
             lambda row: self._call("play_from_queue", row, soco=True, then=self._dirty))
@@ -278,6 +297,8 @@ class MainWindow(QMainWindow):
 
         self.services = Services()
         self.browser = Browser(self.services, lambda: self.current)
+        self.queue.set_art_loader(self.browser.loader)  # one artwork cache for both
+        self.browser.loader.resolver = self._cover_lookup
         self.browser.status.connect(self._status)
         self.browser.error.connect(self._error)
         self.browser.played.connect(lambda: (self._dirty(), self._refresh_queue()))
@@ -324,19 +345,23 @@ class MainWindow(QMainWindow):
         self.device.sleep.connect(self._sleep)
         self.device.forget.connect(self._forget)
 
-        self.tabs = QTabWidget()
-        for widget, label in (
-            (self.queue, "Queue"), (self.library, "Library"),
-            (self.browser, "Browse"), (self.favourites, "Favourites"),
-            (self.alarms, "Alarms"),
-            (self.sound, "Sound"), (self.announce, "Announce"),
-            (self.stream, "Stream desktop"), (self.device, "Device"),
-        ):
-            self.tabs.addTab(widget, label)
-        self.tabs.currentChanged.connect(self._tab_changed)
+        # In the order `PAGES` lists them.
+        self.pages = QStackedWidget()
+        for widget in (self.queue, self.library, self.browser, self.favourites,
+                       self.sound, self.alarms, self.announce, self.stream, self.device):
+            self.pages.addWidget(widget)
+        self.pages.currentChanged.connect(self._page_changed)
+        self.nav.page_chosen.connect(self.pages.setCurrentIndex)
+        self.nav.set_page(0)
+        for n in range(self.pages.count()):  # Ctrl+1 … Ctrl+9
+            QShortcut(QKeySequence(f"Ctrl+{n + 1}"), self,
+                      activated=lambda n=n: self.nav.set_page(n))
+        pane = QFrame(); pane.setObjectName("pagePane")
+        pl = QVBoxLayout(pane); pl.setContentsMargins(10, 10, 10, 10)
+        pl.addWidget(self.pages)
         lower = QWidget(); ll = QVBoxLayout(lower)
-        ll.setContentsMargins(16, 4, 16, 12)
-        ll.addWidget(self.tabs)
+        ll.setContentsMargins(16, 8, 16, 12)
+        ll.addWidget(pane)
 
         centre = QSplitter(Qt.Orientation.Vertical)
         centre.addWidget(upper); centre.addWidget(lower)
@@ -350,38 +375,25 @@ class MainWindow(QMainWindow):
         outer.setChildrenCollapsible(False)
         return outer
 
-    def _build_toolbar(self) -> QToolBar:
-        bar = QToolBar("Main"); bar.setMovable(False)
-        for text, slot, tip in (
-            ("⟳  Find speakers", self._discover, "Search the network again"),
-            ("⧉  Group all here", lambda: self._call("party_mode", then=self._discover),
-             "Pull every speaker into this one's group"),
-            ("⇥  Leave group", lambda: self._call("unjoin", then=self._discover),
-             "Take this speaker out of its group"),
-        ):
-            act = QAction(text, self); act.setToolTip(tip)
-            act.triggered.connect(slot)
-            bar.addAction(act)
-        spacer = QWidget()
-        spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        bar.addWidget(spacer)
+    def _build_actions(self) -> None:
         self.mode_action = QAction(self)
         self.mode_action.triggered.connect(self._toggle_mode)
-        bar.addAction(self.mode_action)
-        themes_action = QAction("🎨  Themes…", self)
-        themes_action.setToolTip("Pick, edit, import or export a colour theme")
-        themes_action.triggered.connect(self._open_themes)
-        bar.addAction(themes_action)
-        self._show_mode()
-        self.server_label = QLabel("media server off"); self.server_label.setObjectName("hint")
-        bar.addWidget(self.server_label)
-        return bar
+        QShortcut(QKeySequence("Ctrl+,"), self, activated=self._open_settings)
+        QShortcut(QKeySequence("F5"), self, activated=self._discover)
 
     def _build_statusbar(self) -> None:
         self.setStatusBar(QStatusBar())
         self.busy = QProgressBar(); self.busy.setRange(0, 0)
         self.busy.setMaximumWidth(120); self.busy.hide()
         self.statusBar().addPermanentWidget(self.busy)
+        # Shown only while the media server runs: it starts by itself the first
+        # time something on this computer is played, and "off" is nothing to act on.
+        self.server_label = QLabel(); self.server_label.setObjectName("hint")
+        self.server_label.setToolTip(
+            "Speakers fetch music files, announcements and the desktop stream\n"
+            "from this computer at this address.")
+        self.server_label.hide()
+        self.statusBar().addPermanentWidget(self.server_label)
 
     # -- small helpers -----------------------------------------------------
 
@@ -432,7 +444,8 @@ class MainWindow(QMainWindow):
 
     def _update_server_label(self) -> None:
         url = self.c.server_url
-        self.server_label.setText(f"media server  {url}" if url else "media server off")
+        self.server_label.setText(f"Sharing from this computer at {url}" if url else "")
+        self.server_label.setVisible(bool(url))
 
     # -- discovery and the speaker list ------------------------------------
 
@@ -533,7 +546,7 @@ class MainWindow(QMainWindow):
                     on_done=lambda s: self.stream.set_sources(s, self.cfg.capture_source or None),
                     on_error=self._error)
         self._refresh_queue()
-        self._tab_changed(self.tabs.currentIndex())
+        self._page_changed(self.pages.currentIndex())
         # Bind the uid now: an event from a speaker the user has since moved away
         # from must not be applied to whichever speaker is selected when it lands.
         workers.run(self.c.watch, sp,
@@ -826,10 +839,10 @@ class MainWindow(QMainWindow):
         self._run(setattr, sp.soco, key, value,
                   ok=f"{key.replace('_', ' ').capitalize()} set.")
 
-    # -- tabs that load lazily ---------------------------------------------
+    # -- pages that load lazily --------------------------------------------
 
-    def _tab_changed(self, index: int) -> None:
-        widget = self.tabs.widget(index)
+    def _page_changed(self, index: int) -> None:
+        widget = self.pages.widget(index)
         # Browsing needs the height; the now-playing card gives it up meanwhile.
         compact = widget in (self.browser, self.library)
         if compact != self.now.compact:
@@ -852,12 +865,31 @@ class MainWindow(QMainWindow):
         elif widget is self.queue:
             self._refresh_queue()
 
+    def _cover_lookup(self, url: str):
+        """How to ask a song's service for its cover, or None if it has none.
+
+        Given to the artwork loader: a queued song's cover would otherwise come
+        from the speaker, which makes them one at a time.
+        """
+        sp = self.current
+        if sp is None or service_track(url) is None:
+            return None
+        return lambda: self.services.cover_for(sp, url)
+
     def _refresh_queue(self) -> None:
         sp = self.current
         if sp is None or not sp.awake:
             return
-        workers.run(lambda: sp.soco.get_queue(max_items=1000),
-                    on_done=self.queue.load, on_error=self._error)
+        def job():
+            items = sp.soco.get_queue(max_items=1000)
+            # Service tracks name their cover relative to the speaker
+            # ("/getaa?…"); local ones already carry a full address.
+            library = sp.soco.music_library
+            arts = [library.build_album_art_full_uri(i.album_art_uri)
+                    if getattr(i, "album_art_uri", None) else "" for i in items]
+            return items, arts
+
+        workers.run(job, on_done=lambda r: self.queue.load(*r), on_error=self._error)
 
     def _clear_queue(self) -> None:
         if self.current is None:
@@ -1061,11 +1093,15 @@ class MainWindow(QMainWindow):
             widget.update()
 
     def _show_mode(self, theme: themes.Theme | None = None) -> None:
+        """Label the light/dark switch, and tint the side bar's icons to match."""
         dark = (theme or self.current_theme()).base == "dark"
-        self.mode_action.setText("☀  Light" if dark else "☾  Dark")
+        self.mode_action.setText("Light mode" if dark else "Dark mode")
         self.mode_action.setToolTip(
             f"Switch to {'light' if dark else 'dark'} mode "
             f"({self.cfg.theme_light if dark else self.cfg.theme_dark})")
+        muted = style.C["muted"]
+        self.mode_action.setIcon(QIcon(nav_icon("sun" if dark else "moon", muted, 18)))
+        self.settings_btn.setIcon(QIcon(nav_icon("settings", muted, 18)))
 
     def _toggle_mode(self) -> None:
         other = "light" if self.current_theme().base == "dark" else "dark"
@@ -1075,6 +1111,11 @@ class MainWindow(QMainWindow):
             target = next(t for t in themes.builtin_themes() if t.base == other)
         self.apply_theme(target)
         self.c._save()
+
+    def _open_settings(self) -> None:
+        from .settings_dialog import SettingsDialog
+
+        SettingsDialog(self).exec()
 
     def _open_themes(self) -> None:
         from .theme_dialog import ThemeDialog

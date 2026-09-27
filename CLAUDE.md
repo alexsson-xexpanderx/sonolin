@@ -15,6 +15,10 @@ python3 -m sonolin.cli -i 192.168.1.14 status        # CLI without installing
 sonolin-gui                                          # after `pip install -e '.[gui]'`
 ```
 
+A test that builds `MainWindow` and lets the event loop run must keep it offline: the window
+starts speaker discovery and a music scan on timers shortly after it opens. The autouse
+`_offline` fixture in `tests/test_app_theme.py` patches both out; put window tests there.
+
 No linter is installed on this machine; `tools/lint.py` is a symtable-based stand-in for
 pyflakes (undefined names, unused imports). Run it after moving code between modules.
 
@@ -41,7 +45,14 @@ In the GUI, panels (`gui/panels.py`) never call a speaker: they take data in and
 out. The one exception is `gui/browser.py`, which runs its own `workers.run` jobs through
 `Services`, because page navigation is request-and-response by nature. It still never touches
 a speaker on the GUI thread, and it discards results for pages the user has already left
-(`_serial`). Its artwork comes from `QNetworkAccessManager` with a disk cache, not from threads. `gui/app.py` decides what each signal means and runs it through `workers.run`, which puts
+(`_serial`). Its artwork (`ArtLoader`, shared with the queue) comes from `QNetworkAccessManager`
+with a disk cache. A speaker's own cover address (`:1400/getaa`) is slow — the speaker makes
+covers one at a time, ~0.25 s each — so the window gives the loader a `resolver` that asks the
+song's service for its image-server address instead (`Services.cover_for`, on the loader's own
+pool), remembered across runs in `~/.cache/sonolin/art-sources.json`. What still comes from a
+speaker is asked for two at a time, newest first. Because service calls now run in parallel,
+the token store takes turns saving and writes atomically (`_token_store` in `services.py`);
+keep it that way. `gui/app.py` decides what each signal means and runs it through `workers.run`, which puts
 the blocking call on `QThreadPool` and delivers the result back on the GUI thread. Every call
 to a speaker is a network round trip to wifi; none may run on the GUI thread.
 

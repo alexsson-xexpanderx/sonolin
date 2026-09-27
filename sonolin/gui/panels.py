@@ -10,9 +10,12 @@ from __future__ import annotations
 import logging
 
 import datetime
+from types import SimpleNamespace
 
-from PyQt6.QtCore import QSize, Qt, QTime, QUrl, pyqtSignal
-from PyQt6.QtGui import QColor, QDesktopServices, QFont, QFontDatabase, QPixmap
+from PyQt6.QtCore import QSize, Qt, QTime, QTimer, QUrl, pyqtSignal
+from PyQt6.QtGui import (
+    QColor, QDesktopServices, QFont, QFontDatabase, QFontMetrics, QIcon, QPixmap,
+)
 from PyQt6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
     QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget,
@@ -43,6 +46,17 @@ def parse_time(text: str) -> float:
     for n in nums:
         total = total * 60 + n
     return total
+
+
+def left_align_headers(table: QTableWidget) -> None:
+    """Headings over the left edge of their column, where the cells start.
+
+    Qt centres table headings by default while cell text starts at the left,
+    so a heading floats in the middle of a wide column, away from what it
+    labels.
+    """
+    table.horizontalHeader().setDefaultAlignment(
+        Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
 
 
 class NowPlaying(QWidget):
@@ -464,6 +478,7 @@ class LibraryTab(QWidget):
         self.albums.currentRowChanged.connect(self._album_changed)
 
         self.tracks = QTableWidget(0, 4)
+        left_align_headers(self.tracks)
         self.tracks.setHorizontalHeaderLabels(["#", "Title", "Artist", "Length"])
         self.tracks.verticalHeader().setVisible(False)
         self.tracks.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -581,7 +596,16 @@ class LibraryTab(QWidget):
 
 
 class QueueTab(QWidget):
-    """The speaker's own queue."""
+    """The speaker's own queue, each entry with its cover."""
+
+    ART = 40
+    #: Rows beyond the visible ones whose covers are fetched ahead of scrolling.
+    ART_MARGIN = 6
+
+    PLAYING = "▶"
+    #: ⏸ with the text-presentation selector, so it is never swapped for an
+    #: emoji picture on systems whose emoji font also covers it.
+    PAUSED = "⏸\ufe0e"
 
     play_index = pyqtSignal(int)
     remove_index = pyqtSignal(int)
@@ -598,9 +622,15 @@ class QueueTab(QWidget):
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        left_align_headers(self.table)
+        self.table.setIconSize(QSize(self.ART, self.ART))
+        self.table.verticalHeader().setDefaultSectionSize(self.ART + 12)
+        self.table.verticalScrollBar().valueChanged.connect(lambda _v: self._fetch_visible_art())
         self.table.doubleClicked.connect(
             lambda idx: self.play_index.emit(idx.row())
         )
+        self._loader = None
+        self._arts: list[str] = []
 
         play_btn = QPushButton("Play")
         play_btn.clicked.connect(self._play)
@@ -643,7 +673,57 @@ class QueueTab(QWidget):
         # Follow the entry so repeated presses keep moving the same one.
         self.table.selectRow(row + step)
 
-    def load(self, items: list) -> None:
+    def set_art_loader(self, loader) -> None:
+        """Share the browser's artwork loader and its cache."""
+        self._loader = loader
+        loader.ready.connect(self._art_landed)
+
+    def _placeholder(self) -> QIcon:
+        # One shared tile: a queue can hold a thousand entries.
+        return QIcon(self._loader.placeholder(SimpleNamespace(title="", kind="track"), self.ART))
+
+    def _fetch_visible_art(self) -> None:
+        """Covers for the rows on screen, and a few either side.
+
+        Every queue entry has its own cover address, even within one album, so
+        asking for all of them would send up to a thousand requests through the
+        speaker at once. Scrolling asks for the next ones as they come into view.
+        """
+        if self._loader is None or not self._arts:
+            return
+        first = self.table.rowAt(0)
+        last = self.table.rowAt(self.table.viewport().height() - 1)
+        first = 0 if first < 0 else first
+        last = len(self._arts) - 1 if last < 0 else last
+        ahead = [*range(max(0, first - self.ART_MARGIN), first),
+                 *range(last + 1, min(len(self._arts), last + self.ART_MARGIN + 1))]
+        # The loader serves the latest request first, so the rows either side
+        # are asked for before the visible ones, and those from the bottom up:
+        # the top of the screen fills in first.
+        for row in [*ahead, *range(last, first - 1, -1)]:
+            self._show_art(row)
+
+    def _show_art(self, row: int) -> None:
+        item = self.table.item(row, 1)
+        url = self._arts[row] if row < len(self._arts) else ""
+        if item is None:
+            return
+        pix = self._loader.pixmap(url, self.ART) if url else None
+        item.setIcon(QIcon(pix) if pix is not None else self._placeholder())
+
+    def _art_landed(self, url: str) -> None:
+        for row, art in enumerate(self._arts):
+            if art == url:
+                self._show_art(row)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._fetch_visible_art()
+
+    def load(self, items: list, arts: list[str] | None = None) -> None:
+        """Show `items`; `arts` holds each entry's full cover address, or ""."""
+        self._arts = self._one_per_album(items, arts) if arts is not None \
+            else [""] * len(items)
         self.table.setRowCount(len(items))
         self._uris = []
         for row, item in enumerate(items):
@@ -653,9 +733,34 @@ class QueueTab(QWidget):
                 self.table.setItem(row, col, QTableWidgetItem(value))
             resources = getattr(item, "resources", None) or []
             self._uris.append(resources[0].uri if resources else "")
-        self.table.resizeColumnToContents(0)
+        # Wide enough for the playing row's "⏸ 18", so the column does not jump
+        # when the mark moves.
+        bold = QFont(self.table.font()); bold.setBold(True)
+        widest = f"{self.PAUSED} {max(len(items), 1)}"
+        self.table.setColumnWidth(0, QFontMetrics(bold).horizontalAdvance(widest) + 28)
         self._playing_row = -1  # every row was just rebuilt unstyled
         self._show_playing()
+        if self._loader is not None:
+            placeholder = self._placeholder()
+            for row in range(len(items)):
+                self.table.item(row, 1).setIcon(placeholder)
+            QTimer.singleShot(0, self._fetch_visible_art)  # once rows are laid out
+
+    @staticmethod
+    def _one_per_album(items: list, arts: list[str]) -> list[str]:
+        """Give songs from one album the same cover address.
+
+        The speaker names each song's cover separately even when they are all
+        the album's, and fetching one is slow, so a whole album costs one fetch.
+        Albums are told apart by artist too: many are called "Greatest Hits".
+        """
+        first: dict[tuple[str, str], str] = {}
+        out = list(arts)
+        for row, (item, art) in enumerate(zip(items, arts)):
+            album = getattr(item, "album", "") or ""
+            if album and art:
+                out[row] = first.setdefault((album, getattr(item, "creator", "") or ""), art)
+        return out
 
     def set_playing(self, position: int, uri: str, state: str) -> None:
         """Mark the queue entry the speaker is on.
@@ -685,7 +790,8 @@ class QueueTab(QWidget):
         if previous != row and 0 <= previous < self.table.rowCount():
             self._style_row(previous, None)
         if row >= 0:
-            self._style_row(row, "▶" if state in ("PLAYING", "TRANSITIONING") else "❚❚")
+            self._style_row(row, self.PLAYING if state in ("PLAYING", "TRANSITIONING")
+                            else self.PAUSED)
             if row != previous:
                 self.table.scrollToItem(self.table.item(row, 1),
                                         QAbstractItemView.ScrollHint.EnsureVisible)
@@ -704,8 +810,8 @@ class QueueTab(QWidget):
                 item.setData(Qt.ItemDataRole.ForegroundRole, None)
         number = self.table.item(row, 0)
         if number is not None:
-            number.setText(glyph if on else str(row + 1))
-            number.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            # The mark goes beside the number, not over it.
+            number.setText(f"{glyph} {row + 1}" if on else str(row + 1))
 
     def restyle(self) -> None:
         """Recolour the playing row after a theme change."""
@@ -854,6 +960,7 @@ class AlarmsTab(QWidget):
         super().__init__()
         self._alarms: list = []
         self.table = QTableWidget(0, 5)
+        left_align_headers(self.table)
         self.table.setHorizontalHeaderLabels(["On", "Time", "Repeat", "Room", "Volume"])
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)

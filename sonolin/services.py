@@ -17,10 +17,14 @@ user's browser with the service itself; no password passes through here.
 
 from __future__ import annotations
 
+import contextlib
+import json
 import logging
 import os
+import threading
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import parse_qs, unquote, urlsplit
 
 from .config import config_path
 
@@ -32,6 +36,82 @@ BROADCAST_PREFIX = "F00092020"
 
 def token_path() -> Path:
     return config_path().parent / "service_tokens.json"
+
+
+#: Guards the token store: its creation, and every save.
+_TOKEN_LOCK = threading.Lock()
+
+
+def _token_store(path: Path):
+    """SoCo's JSON token store, made safe to share between threads.
+
+    Cover lookups run several service calls at once, and any of them can come
+    back with a refreshed token, which SoCo saves straight away. SoCo's own save
+    empties the file and rewrites it in place, so two saves at once can leave it
+    half-written and the service unlinked. Here saves take turns, and each one
+    lands whole: the new file is written beside the old, private from the start,
+    then renamed over it. The rename replaces the file a symlink points at, not
+    the link.
+    """
+    from soco.music_services.token_store import JsonFileTokenStore
+
+    class PrivateTokenStore(JsonFileTokenStore):
+        def save_token_pair(self, music_service_id, household_id, token_pair):
+            with _TOKEN_LOCK:
+                super().save_token_pair(music_service_id, household_id, token_pair)
+
+        def save_collection(self):
+            target = Path(os.path.realpath(self.filepath))
+            partial = target.with_name(target.name + ".partial")
+            with contextlib.suppress(FileNotFoundError):
+                partial.unlink()
+            fd = os.open(partial, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "w", encoding="UTF-8") as fh:
+                json.dump(self._token_store, fh, indent=4)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(partial, target)
+
+    return PrivateTokenStore(str(path), token_collection="sonolin")
+
+
+#: Audio extensions some services append to the item id in a song's URI.
+_MEDIA_SUFFIXES = (".mp3", ".mp4", ".m4a", ".flac", ".aac", ".ogg")
+
+
+def service_track(cover_url: str) -> tuple[int, str] | None:
+    """The service and item id behind a speaker's cover address, if it has one.
+
+    A queued song's cover is ``http://<speaker>:1400/getaa?s=1&u=<song URI>``,
+    and the URI of a song from a service names both the service and the song:
+    ``x-sonos-spotify:spotify%3atrack%3a1l5L…?sid=9&flags=8232&sn=2``.
+    """
+    parts = urlsplit(cover_url)
+    if not parts.path.endswith("/getaa"):
+        return None
+    uri = parse_qs(parts.query).get("u", [""])[0]
+    scheme, _, rest = uri.partition(":")
+    body, _, query = rest.partition("?")
+    sid = parse_qs(query).get("sid", [""])[0]
+    if not (scheme and body and sid.isdigit()):
+        return None
+    item_id = unquote(body)
+    if scheme == "x-sonos-http" and item_id.lower().endswith(_MEDIA_SUFFIXES):
+        item_id = item_id.rsplit(".", 1)[0]
+    return int(sid), item_id
+
+
+def art_address(metadata) -> str:
+    """The picture in a service's ``getMediaMetadata`` answer, or ""."""
+    for part, key in (("trackMetadata", "albumArtURI"), ("streamMetadata", "logo"),
+                      (None, "albumArtURI")):
+        holder = metadata.get(part) if part else metadata
+        value = holder.get(key) if isinstance(holder, dict) else None
+        if isinstance(value, dict):  # an address with attributes
+            value = value.get("#text")
+        if isinstance(value, str) and value.startswith(("http://", "https://")):
+            return value
+    return ""
 
 
 #: SMAPI item types that are folders of other things rather than content.
@@ -152,23 +232,22 @@ class Services:
 
     @property
     def store(self):
-        if self._store is None:
-            from soco.music_services.token_store import JsonFileTokenStore
-
-            path = token_path()
-            path.parent.mkdir(parents=True, exist_ok=True)
-            # The file holds service authorisations. SoCo creates it with the
-            # default mode, readable by every user on the machine; create it
-            # private first, and tighten one that already exists. A rewrite
-            # keeps the mode it finds.
-            if not path.exists():
-                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-                with os.fdopen(fd, "w") as fh:
-                    fh.write("{}")
-            elif path.stat().st_mode & 0o077:
-                path.chmod(0o600)
-            self._store = JsonFileTokenStore(str(path), token_collection="sonolin")
-        return self._store
+        with _TOKEN_LOCK:  # cover lookups may be first to ask, several at once
+            if self._store is None:
+                path = token_path()
+                path.parent.mkdir(parents=True, exist_ok=True)
+                # The file holds service authorisations. SoCo creates it with
+                # the default mode, readable by every user on the machine;
+                # create it private first, and tighten one that already exists.
+                # Rewrites are private too (see `_token_store`).
+                if not path.exists():
+                    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                    with os.fdopen(fd, "w") as fh:
+                        fh.write("{}")
+                elif path.stat().st_mode & 0o077:
+                    path.chmod(0o600)
+                self._store = _token_store(path)
+            return self._store
 
     # -- catalogue ---------------------------------------------------------
 
@@ -217,6 +296,23 @@ class Services:
 
             self._open[key] = MusicService(name, token_store=self.store, device=speaker.soco)
         return self._open[key]
+
+    def cover_for(self, speaker, cover_url: str) -> str:
+        """The service's own address for a queued song's cover, or "".
+
+        The speaker makes covers one at a time, about a quarter of a second
+        each, fetching every one from the service first. Asked directly, the
+        service names its image server's address for many songs at once, and
+        those load in parallel. Only services linked here are asked.
+        """
+        found = service_track(cover_url)
+        if found is None:
+            return ""
+        sid, item_id = found
+        info = next((s for s in self.catalogue() if s.service_id == sid), None)
+        if info is None or not self.is_linked(info.name, speaker):
+            return ""
+        return art_address(self.open(info.name, speaker).get_media_metadata(item_id))
 
     def begin_link(self, name: str, speaker) -> str:
         """Start linking an AppLink/DeviceLink service. Returns the URL to open.

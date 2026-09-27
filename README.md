@@ -94,7 +94,7 @@ and nothing else in the Python Sonos world does it.
 
 **Sound.** Bass, treble, loudness, balance. On soundbars also night mode, speech
 enhancement, surround level and mode, subwoofer level and crossover, and audio
-delay. The Sound tab only shows the controls your model actually has.
+delay. The Sound page only shows the controls your model actually has.
 
 **Rooms.** Group and ungroup, group everything, create and separate stereo pairs,
 switch to line-in or TV, rename the room.
@@ -105,8 +105,8 @@ touch-control lock, firmware, and the undocumented diagnostic pages.
 **Your desktop.** Media keys, Plasma's and GNOME's media widgets, and the lock
 screen all control the selected speaker, through MPRIS.
 
-**Themes.** A ☀/☾ button in the toolbar switches between light and dark. *Themes…*
-opens the theme editor: pick a theme and the whole app recolours at once; change
+**Themes.** The sun/moon button at the foot of the side bar switches between
+light and dark. *Settings › Themes…* opens the theme editor: pick a theme and the whole app recolours at once; change
 any colour with a picker or a hex code; save it as your own; import a theme file
 someone shared; export yours. It comes with Dark, Light, Nord, Solarized Light and
 Synthwave. The toggle remembers your favourite on each side, so a custom dark
@@ -116,7 +116,7 @@ theme survives a trip to light mode.
 discovery cannot see it. Sonolin remembers every speaker it has found, shows a
 sleeping one as asleep instead of forgetting it, and picks it up again when it
 wakes. Speakers discovery cannot reach at all, for instance across a VLAN, can
-be added by address.
+be added by address in *Settings*.
 
 ![Browsing Spotify](docs/browse-artist.png)
 
@@ -135,7 +135,7 @@ comes from the `base` palette (`dark` or `light`), so this is a complete theme:
 }
 ```
 
-Import it with *Themes… › Import…*, or drop it into `~/.config/sonolin/themes/`.
+Import it with *Settings › Themes… › Import…*, or drop it into `~/.config/sonolin/themes/`.
 To see every colour you can set, export any theme: exported files list all
 sixteen, each described by name in the editor (`bg`, `surface`, `accent`,
 `selection_text` and so on). A file with a mistake is refused with the reason,
@@ -257,7 +257,9 @@ without it.
 
 Settings live in `~/.config/sonolin/config.json`; music-service tokens beside it
 in `service_tokens.json`. Artwork is cached in `~/.cache/sonolin/art` (up to
-250 MB).
+250 MB). Covers of queued songs from a linked service come from the service's
+image servers rather than the speaker, which is many times faster; which
+address belongs to which song is kept in `~/.cache/sonolin/art-sources.json`.
 
 ## Licence
 

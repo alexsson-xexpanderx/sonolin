@@ -125,3 +125,144 @@ def test_menu_play_on_one_song_keeps_its_list(app, monkeypatch):
     menu = b.build_menu(album[1:3], context=album)
     next(a for a in menu.actions() if a.text() == "▶  Play").trigger()
     assert seen == [(5, 3), ("exact", 2)]
+
+
+# -- artwork loading --------------------------------------------------------------
+
+import time  # noqa: E402
+
+from sonolin.gui.browser import ArtLoader, _Lane  # noqa: E402
+
+
+def test_the_latest_request_goes_first_a_few_at_a_time():
+    started = []
+    lane = _Lane(2, started.append)
+    for key in "abcde":
+        lane.ask(key)
+    assert started == ["a", "b"], "no more than two at once"
+    lane.ask("c")                   # scrolled back to c: it moves up
+    lane.ask("a")                   # already running: not started twice
+    lane.done("a")
+    assert started == ["a", "b", "c"]
+    lane.done("b")
+    assert started[-1] == "e"
+    lane.done("c"); lane.done("e")
+    assert started[-1] == "d" and not lane.waiting
+
+
+def _png(path, colour="teal"):
+    img = QImage(64, 64, QImage.Format.Format_RGB32)
+    img.fill(QColor(colour))
+    img.save(str(path))
+    return path.as_uri()
+
+
+def _wait(app, done, seconds=5.0):
+    end = time.monotonic() + seconds
+    while not done() and time.monotonic() < end:
+        app.processEvents()
+        time.sleep(0.005)
+    return done()
+
+
+SPEAKER_ART = "http://speaker.invalid:1400/getaa?s=1&u=song{}"
+
+
+def _loader(monkeypatch):
+    """A loader that records what it would ask a speaker for, without asking."""
+    loader = ArtLoader()
+    sent, real_send = [], loader._send
+    monkeypatch.setattr(loader, "_send", lambda url: sent.append(url) if url.startswith(
+        "http") else real_send(url))
+    loader._speaker_lane.start = loader._send
+    landed = []
+    loader.ready.connect(landed.append)
+    return loader, sent, landed
+
+
+def test_a_resolved_cover_comes_from_the_faster_address(app, tmp_path, monkeypatch):
+    loader, sent, landed = _loader(monkeypatch)
+    fast = _png(tmp_path / "cover.png")
+    loader.resolver = lambda url: (lambda: fast)
+    assert loader.pixmap(SPEAKER_ART.format(1), 40) is None
+    assert _wait(app, lambda: SPEAKER_ART.format(1) in landed)
+    assert loader.pixmap(SPEAKER_ART.format(1), 40) is not None
+    assert sent == [], "the speaker was never asked"
+
+
+def test_songs_resolving_to_one_picture_fetch_it_once(app, tmp_path, monkeypatch):
+    loader, sent, landed = _loader(monkeypatch)
+    fast = _png(tmp_path / "album.png")
+    fetched = []
+    real_send = loader._send
+    monkeypatch.setattr(loader, "_send", lambda url: (fetched.append(url), real_send(url)))
+    loader._speaker_lane.start = loader._send
+    loader.resolver = lambda url: (lambda: fast)
+    for n in range(3):
+        loader.pixmap(SPEAKER_ART.format(n), 40)
+    assert _wait(app, lambda: all(SPEAKER_ART.format(n) in landed for n in range(3)))
+    assert fetched == [fast]
+
+
+def test_a_failed_lookup_falls_back_to_the_speaker(app, tmp_path, monkeypatch):
+    loader, sent, landed = _loader(monkeypatch)
+    loader.resolver = lambda url: (lambda: (_ for _ in ()).throw(OSError("no route")))
+    loader.pixmap(SPEAKER_ART.format(1), 40)
+    assert _wait(app, lambda: sent == [SPEAKER_ART.format(1)])
+
+
+def test_a_broken_faster_address_falls_back_to_the_speaker(app, tmp_path, monkeypatch):
+    loader, sent, landed = _loader(monkeypatch)
+    missing = (tmp_path / "gone.png").as_uri()
+    loader.resolver = lambda url: (lambda: missing)
+    loader.pixmap(SPEAKER_ART.format(1), 40)
+    assert _wait(app, lambda: sent == [SPEAKER_ART.format(1)])
+
+
+def test_other_covers_are_fetched_directly(app, tmp_path, monkeypatch):
+    loader, sent, landed = _loader(monkeypatch)
+    loader.resolver = lambda url: None
+    loader.pixmap("https://i.scdn.co/image/abc", 40)
+    assert sent == ["https://i.scdn.co/image/abc"]
+
+
+def test_a_speaker_is_asked_for_two_covers_at_a_time(app, monkeypatch):
+    loader, sent, landed = _loader(monkeypatch)
+    for n in range(6):
+        loader.pixmap(SPEAKER_ART.format(n), 40)
+    assert sent == [], "nothing starts until the whole screenful is known"
+    app.processEvents()
+    assert sent == [SPEAKER_ART.format(5), SPEAKER_ART.format(4)], "newest first, two at once"
+    assert len(loader._speaker_lane.waiting) == 4
+
+
+def test_starting_waits_for_the_whole_batch():
+    started, deferred = [], []
+    lane = _Lane(2, started.append, deferred.append)
+    for key in "abcd":
+        lane.ask(key)
+    assert started == [] and len(deferred) == 1, "one start is scheduled, not four"
+    deferred.pop()()
+    assert started == ["d", "c"]
+
+
+def test_a_resolved_cover_is_remembered_for_next_time(app, tmp_path, monkeypatch):
+    loader, sent, landed = _loader(monkeypatch)
+    fast = _png(tmp_path / "cover.png")
+    loader.resolver = lambda url: (lambda: fast)
+    loader.pixmap(SPEAKER_ART.format(1), 40)
+    assert _wait(app, lambda: SPEAKER_ART.format(1) in landed)
+    assert loader._save_soon.isActive()
+    loader._save_sources()          # as the timer would
+
+    again, sent, landed = _loader(monkeypatch)
+    again.resolver = lambda url: pytest.fail("looked up again")
+    again.pixmap(SPEAKER_ART.format(1), 40)
+    assert _wait(app, lambda: SPEAKER_ART.format(1) in landed)
+    assert sent == []
+
+
+def test_a_damaged_address_file_is_ignored(app, monkeypatch):
+    loader, sent, landed = _loader(monkeypatch)
+    loader._sources_file.write_text("{not json")
+    assert ArtLoader()._load_sources() == {}

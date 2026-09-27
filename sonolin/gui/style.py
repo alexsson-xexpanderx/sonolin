@@ -69,11 +69,40 @@ QSplitter::handle {{
     letter-spacing: 1.5px;
     padding: 14px 16px 6px 16px;
 }}
-#speakerList {{
+#speakerList, #navList {{
     background: transparent;
     border: none;
     outline: none;
     padding: 4px 8px;
+}}
+#sidebarButton {{
+    background: transparent;
+    border: none;
+    border-radius: 9px;
+    color: {C['muted']};
+    padding: 8px 12px;
+    text-align: left;
+}}
+#sidebarButton:hover {{
+    background: {C['raised']};
+    color: {C['text']};
+}}
+#sectionTitle {{
+    color: {C['faint']};
+    font-size: 8.5pt;
+    font-weight: 700;
+    letter-spacing: 1.5px;
+    padding-top: 14px;
+}}
+QPushButton#segment:checked {{
+    background: {C['accent_lo']};
+    border-color: {C['accent']};
+    color: {C['selection_text']};
+}}
+#navList {{
+    padding-top: 6px;
+    border-bottom: 1px solid {C['border']};
+    border-radius: 0;
 }}
 /* ---- now playing ---------------------------------------------------- */
 #nowPlaying {{
@@ -228,28 +257,11 @@ QSlider::handle:horizontal:hover {{
     background: {C['accent']};
 }}
 
-/* ---- tabs ----------------------------------------------------------- */
-QTabWidget::pane {{
+/* ---- pages --------------------------------------------------------- */
+#pagePane {{
     background: {C['surface']};
     border: 1px solid {C['border']};
     border-radius: 14px;
-    top: -1px;
-    padding: 10px;
-}}
-QTabBar::tab {{
-    background: transparent;
-    color: {C['muted']};
-    padding: 9px 16px;
-    margin-right: 2px;
-    border: none;
-    border-bottom: 2px solid transparent;
-}}
-QTabBar::tab:hover {{
-    color: {C['text']};
-}}
-QTabBar::tab:selected {{
-    color: {C['text']};
-    border-bottom: 2px solid {C['accent']};
 }}
 
 /* ---- lists and tables ----------------------------------------------- */

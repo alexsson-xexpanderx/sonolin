@@ -1,7 +1,7 @@
 import xml.etree.ElementTree as ET
 from types import SimpleNamespace
 
-from sonolin.services import BROADCAST_PREFIX, Services, ServiceInfo
+from sonolin.services import BROADCAST_PREFIX, Services, ServiceInfo, art_address, service_track
 
 
 def item(kind, **meta):
@@ -229,3 +229,100 @@ def test_token_file_is_private(tmp_path, monkeypatch):
     token_path().chmod(0o644)       # as SoCo used to leave it
     Services().store
     assert stat.S_IMODE(token_path().stat().st_mode) == 0o600
+
+
+# -- covers from the service rather than the speaker ----------------------------
+
+SPOTIFY_COVER = ("http://10.0.0.2:1400/getaa?s=1&u=x-sonos-spotify%3aspotify%253atrack"
+                 "%253a1l5LxX34FgwqlhvMb7BPXq%3fsid%3d9%26flags%3d8232%26sn%3d2")
+
+
+def test_a_speaker_cover_names_its_service_and_song():
+    assert service_track(SPOTIFY_COVER) == (9, "spotify:track:1l5LxX34FgwqlhvMb7BPXq")
+    apple = ("http://10.0.0.2:1400/getaa?s=1&u=x-sonos-http%3asong%253a1487285432.mp4"
+             "%3fsid%3d204%26flags%3d8224%26sn%3d3")
+    assert service_track(apple) == (204, "song:1487285432")
+
+
+def test_covers_without_a_service_are_left_alone():
+    assert service_track("https://i.scdn.co/image/ab67616d0000b273") is None
+    assert service_track("http://10.0.0.9:1405/art/3f2a.jpg") is None
+    # A file shared from a computer: no sid, so no service to ask.
+    assert service_track("http://10.0.0.2:1400/getaa?s=1&u=x-file-cifs%3a%2f%2fnas%2fa.flac") \
+        is None
+    assert service_track("") is None
+
+
+def test_the_picture_is_found_wherever_the_service_puts_it():
+    track = {"trackMetadata": {"albumArtURI": "https://i.scdn.co/image/abc"}}
+    assert art_address(track) == "https://i.scdn.co/image/abc"
+    with_attrs = {"trackMetadata": {"albumArtURI": {"@requiresAuthentication": "false",
+                                                    "#text": "https://img/x.jpg"}}}
+    assert art_address(with_attrs) == "https://img/x.jpg"
+    assert art_address({"streamMetadata": {"logo": "https://img/logo.png"}}) \
+        == "https://img/logo.png"
+    assert art_address({"trackMetadata": {"artist": "M83"}}) == ""
+    assert art_address({"trackMetadata": {"albumArtURI": "not-a-url"}}) == ""
+
+
+def _cover_services(monkeypatch, linked=True):
+    svc = Services()
+    svc._catalogue = [ServiceInfo("Spotify", "AppLink", 9, 2311)]
+    asked = []
+    monkeypatch.setattr(svc, "is_linked", lambda name, sp: linked)
+    monkeypatch.setattr(svc, "open", lambda name, sp: SimpleNamespace(
+        get_media_metadata=lambda item_id: asked.append(item_id) or
+        {"trackMetadata": {"albumArtURI": "https://i.scdn.co/image/elvis"}}))
+    return svc, asked
+
+
+def test_a_linked_service_is_asked_for_the_cover(monkeypatch):
+    svc, asked = _cover_services(monkeypatch)
+    assert svc.cover_for(None, SPOTIFY_COVER) == "https://i.scdn.co/image/elvis"
+    assert asked == ["spotify:track:1l5LxX34FgwqlhvMb7BPXq"]
+
+
+def test_unlinked_or_unknown_services_are_not_asked(monkeypatch):
+    svc, asked = _cover_services(monkeypatch, linked=False)
+    assert svc.cover_for(None, SPOTIFY_COVER) == ""
+    svc, asked = _cover_services(monkeypatch)
+    assert svc.cover_for(None, SPOTIFY_COVER.replace("sid%3d9", "sid%3d77")) == ""
+    assert asked == []
+
+
+def test_token_saves_at_once_leave_a_whole_private_file(tmp_path, monkeypatch):
+    import json
+    import stat
+    import threading
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    from sonolin.services import token_path
+    store = Services().store
+    threads = [threading.Thread(target=lambda n=n: [
+        store.save_token_pair(n, "Sonos_household", (f"token{n}-{i}" * 200, f"key{n}"))
+        for i in range(20)]) for n in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    saved = json.loads(token_path().read_text())["sonolin"]
+    assert len(saved) == 8
+    assert stat.S_IMODE(token_path().stat().st_mode) == 0o600
+    assert not list(token_path().parent.glob("*.partial"))
+
+
+def test_a_linked_token_file_stays_linked(tmp_path, monkeypatch):
+    """Tests link the real token file into a scratch config; a refresh must
+    reach the real file, not replace the link with a copy."""
+    import json
+
+    real = tmp_path / "real_tokens.json"
+    real.write_text("{}")
+    real.chmod(0o600)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "scratch"))
+    from sonolin.services import token_path
+    token_path().parent.mkdir(parents=True)
+    token_path().symlink_to(real)
+    Services().store.save_token_pair(9, "Sonos_household", ("fresh", "key"))
+    assert token_path().is_symlink()
+    assert "fresh" in json.dumps(json.loads(real.read_text()))

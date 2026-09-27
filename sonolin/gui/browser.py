@@ -20,18 +20,20 @@ servers, asynchronously on the GUI thread, with a disk cache under
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import math
 import os
 from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass, replace
+from functools import partial
 from pathlib import Path
 from urllib.parse import unquote
 
 from PyQt6.QtCore import (
     QAbstractListModel, QEvent, QModelIndex, QObject, QPointF, QRect, QRectF, QSize,
-    Qt, QUrl, pyqtSignal,
+    Qt, QThreadPool, QTimer, QUrl, pyqtSignal,
 )
 from PyQt6.QtGui import (
     QColor, QFont, QFontMetrics, QGuiApplication, QImage, QLinearGradient, QPainter,
@@ -178,11 +180,67 @@ def _shape(image: QImage, size: int, round_: bool, radius: float = 10,
     return out
 
 
+#: Where a speaker serves covers (``/getaa``), as for all its UPnP traffic.
+SPEAKER_PORT = 1400
+
+
+class _Lane:
+    """Work done a few at a time, the latest request first.
+
+    What is on screen was asked for last, so it goes ahead of whatever was asked
+    for while scrolling past it. Asking again for something still waiting moves
+    it to the front. `later` puts off starting until a whole screenful has been
+    asked for; otherwise the first few asked would always start first.
+    """
+
+    def __init__(self, slots: int, start: Callable[[str], None],
+                 later: Callable[[Callable[[], None]], None] = lambda fn: fn()) -> None:
+        self.slots, self.start, self.later = slots, start, later
+        self.waiting: dict[str, None] = {}  # insertion-ordered; the newest is last
+        self.running: set[str] = set()
+        self._due = False
+
+    def ask(self, key: str) -> None:
+        if key in self.running:
+            return
+        self.waiting.pop(key, None)
+        self.waiting[key] = None
+        if not self._due:
+            self._due = True
+            self.later(self._pump)
+
+    def done(self, key: str) -> None:
+        self.running.discard(key)
+        self._pump()
+
+    def _pump(self) -> None:
+        self._due = False
+        while self.waiting and len(self.running) < self.slots:
+            key, _ = self.waiting.popitem()
+            self.running.add(key)
+            self.start(key)
+
+
 class ArtLoader(QObject):
-    """Fetches, caches and shapes artwork. `ready(url)` fires when one lands."""
+    """Fetches, caches and shapes artwork. `ready(url)` fires when one lands.
+
+    Covers served by a speaker are slow: it makes them one at a time, about a
+    quarter of a second each, so a screenful of queue takes seconds. Two things
+    help. A `resolver` can name a faster address for the same picture, such as
+    the service's own image server, which serves many at once. And what still
+    has to come from a speaker is asked for two at a time, newest first, so the
+    covers on screen never wait behind ones scrolled past.
+    """
 
     ready = pyqtSignal(str)
     MAX_IMAGES = 400
+    #: Covers asked of one speaker at once; it answers them in turn anyway.
+    SPEAKER_SLOTS = 2
+    #: Resolver lookups in flight at once.
+    LOOKUP_SLOTS = 6
+    #: Resolved addresses remembered between runs, so a cover seen once loads
+    #: straight from the disk cache next time, without a lookup.
+    MAX_SOURCES = 5000
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -196,30 +254,117 @@ class ArtLoader(QObject):
         self._placeholders: dict[tuple, QPixmap] = {}
         self._pending: set[str] = set()
         self._failed: set[str] = set()
+        #: Given an artwork address, returns a blocking function that finds a
+        #: faster address for the same picture ("" for none), or None when it
+        #: has nothing to offer. The function runs off the GUI thread.
+        self.resolver: Callable[[str], Callable[[], str] | None] | None = None
+        self._aliases: dict[str, str] = {}      # address asked for -> address fetched
+        self._askers: dict[str, set[str]] = {}  # address fetched -> addresses asked for
+        self._lookups: dict[str, Callable[[], str]] = {}
+        self._pool = QThreadPool(self)
+        self._pool.setMaxThreadCount(self.LOOKUP_SLOTS)
+        next_tick = partial(QTimer.singleShot, 0)
+        self._lookup_lane = _Lane(self.LOOKUP_SLOTS, self._look_up, next_tick)
+        self._speaker_lane = _Lane(self.SPEAKER_SLOTS, self._send, next_tick)
+        self._sources_file = cache_dir().parent / "art-sources.json"
+        self._save_soon = QTimer(self, singleShot=True, interval=2000)
+        self._save_soon.timeout.connect(self._save_sources)
+        for url, source in self._load_sources().items():
+            self._aliases[url] = source
+            self._askers.setdefault(source, set()).add(url)
+
+    def _load_sources(self) -> dict[str, str]:
+        try:
+            data = json.loads(self._sources_file.read_text())
+        except (OSError, ValueError):
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        return {u: s for u, s in data.items() if isinstance(u, str) and isinstance(s, str)}
+
+    def _save_sources(self) -> None:
+        known = [(u, s) for u, s in self._aliases.items() if u != s][-self.MAX_SOURCES:]
+        draft = self._sources_file.with_suffix(".partial")
+        try:
+            draft.write_text(json.dumps(dict(known)))
+            os.replace(draft, self._sources_file)
+        except OSError as exc:
+            log.debug("could not save artwork addresses: %s", exc)
 
     def pixmap(self, url: str, size: int, round_: bool = False,
                tint: str | None = None) -> QPixmap | None:
         """The artwork if it is here already; otherwise start fetching it."""
-        if not url or url in self._failed:
+        if not url:
             return None
-        key = (url, size, round_, tint)
+        source = self._aliases.get(url, url)
+        if source in self._failed:
+            return None
+        key = (source, size, round_, tint)
         cached = self._pixmaps.get(key)
         if cached is not None:
             return cached
-        image = self._images.get(url)
+        image = self._images.get(source)
         if image is None:
-            self._fetch(url)
+            self._request(url)
             return None
-        self._images.move_to_end(url)
+        self._images.move_to_end(source)
         if len(self._pixmaps) > 1500:
             self._pixmaps.clear()
         shaped = self._pixmaps[key] = _shape(image, size, round_, tint=tint)
         return shaped
 
+    def _request(self, url: str) -> None:
+        if url in self._aliases:
+            self._fetch(self._aliases[url])
+        elif url in self._lookups:
+            self._lookup_lane.ask(url)  # still wanted: move it up
+        else:
+            lookup = self.resolver(url) if self.resolver is not None else None
+            if lookup is None or self._on_disk(url):
+                self._use(url, url)
+            else:
+                self._lookups[url] = lookup
+                self._lookup_lane.ask(url)
+
+    def _on_disk(self, url: str) -> bool:
+        cache = self.nam.cache()
+        return cache is not None and cache.metaData(QUrl(url)).isValid()
+
+    def _look_up(self, url: str) -> None:
+        job = workers.Job(self._lookups[url])
+        job.signals.done.connect(lambda found, u=url: self._looked_up(u, found))
+        job.signals.failed.connect(lambda _e, u=url: self._looked_up(u, ""))
+        self._pool.start(job)
+
+    def _looked_up(self, url: str, found: str) -> None:
+        self._lookups.pop(url, None)
+        self._lookup_lane.done(url)
+        self._use(url, found or url)
+
+    def _use(self, url: str, source: str) -> None:
+        """Fetch `url`'s picture from `source` from now on."""
+        if self._aliases.get(url, url) != source:
+            self._save_soon.start()
+        self._aliases[url] = source
+        self._askers.setdefault(source, set()).add(url)
+        if source in self._images:
+            self.ready.emit(url)
+        else:
+            self._fetch(source)
+
     def _fetch(self, url: str) -> None:
-        if url in self._pending:
+        if url in self._speaker_lane.waiting:
+            self._speaker_lane.ask(url)  # still wanted: move it up
+            return
+        if url in self._pending or url in self._failed:
             return
         self._pending.add(url)
+        if QUrl(url).port() == SPEAKER_PORT and not self._on_disk(url):
+            self._speaker_lane.ask(url)
+        else:
+            self._send(url)
+
+    def _send(self, url: str) -> None:
         req = QNetworkRequest(QUrl(url))
         req.setAttribute(QNetworkRequest.Attribute.CacheLoadControlAttribute,
                          QNetworkRequest.CacheLoadControl.PreferCache)
@@ -229,7 +374,9 @@ class ArtLoader(QObject):
 
     def _landed(self, url: str, reply: QNetworkReply) -> None:
         self._pending.discard(url)
+        self._speaker_lane.done(url)
         image = QImage()
+        askers = self._askers.get(url, set()) - {url}
         if reply.error() == QNetworkReply.NetworkError.NoError \
                 and image.loadFromData(bytes(reply.readAll())):
             if image.width() > 640:  # service art is often 640 px or more
@@ -240,8 +387,12 @@ class ArtLoader(QObject):
                 old, _ = self._images.popitem(last=False)
                 self._pixmaps = {k: v for k, v in self._pixmaps.items() if k[0] != old}
             self.ready.emit(url)
+            for asker in askers:
+                self.ready.emit(asker)
         else:
             self._failed.add(url)
+            for asker in askers:  # the faster address let us down: go the slow way
+                self._use(asker, asker)
         reply.deleteLater()
 
     def placeholder(self, entry: Entry, size: int, round_: bool = False) -> QPixmap:
