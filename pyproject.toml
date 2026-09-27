@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nosonpy"
+version = "0.1.0"
+description = "A Python Sonos controller: UPnP and the local WebSocket API behind one object"
+requires-python = ">=3.11"
+license = { text = "GPL-3.0-only" }
+dependencies = ["soco>=0.30", "aiohttp>=3.9"]
+
+[project.optional-dependencies]
+gui = ["PyQt6>=6.5"]
+
+[project.scripts]
+nosonpy = "nosonpy.cli:main"
+nosonpy-gui = "nosonpy.gui:main"
+
+[tool.setuptools.packages.find]
+include = ["nosonpy*"]
+
+[tool.setuptools.package-data]
+"nosonpy.gui" = ["theme_files/*.json", "nosonpy.svg"]

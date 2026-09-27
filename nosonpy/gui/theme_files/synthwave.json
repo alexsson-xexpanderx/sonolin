@@ -1,0 +1,11 @@
+{
+  "name": "Synthwave",
+  "base": "dark",
+  "colors": {
+    "bg": "#120b1f", "surface": "#1a1030", "raised": "#251742", "hover": "#301d55",
+    "border": "#3a2463", "text": "#f4e9ff", "muted": "#b69bd6", "faint": "#7d64a0",
+    "accent": "#ff3ea5", "accent_hi": "#ff6bbd", "accent_lo": "#5a1f6e",
+    "on_accent": "#120b1f", "selection_text": "#ffffff",
+    "good": "#2de2e6", "warn": "#f9c80e", "danger": "#ff4f5e"
+  }
+}
