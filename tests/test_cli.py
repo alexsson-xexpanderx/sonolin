@@ -1,6 +1,6 @@
 import pytest
 
-from nosonpy import cli
+from sonolin import cli
 
 
 def test_every_subcommand_parses():
@@ -56,7 +56,7 @@ def test_cli_does_not_need_qt():
     import subprocess
     import sys
 
-    code = ("import sys, nosonpy.cli, nosonpy.controller, nosonpy.services; "
+    code = ("import sys, sonolin.cli, sonolin.controller, sonolin.services; "
             "print(sorted(m for m in sys.modules if m.startswith('PyQt')))")
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
                          check=True).stdout.strip()

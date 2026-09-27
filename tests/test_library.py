@@ -1,4 +1,4 @@
-from nosonpy.library import Library
+from sonolin.library import Library
 
 
 def test_scan_finds_audio_and_skips_other_files(music_dir):

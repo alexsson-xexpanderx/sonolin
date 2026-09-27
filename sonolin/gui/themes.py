@@ -14,7 +14,7 @@ toggle the theme belongs to. The app itself always writes every colour, so a
 saved or exported theme shows every key there is to change.
 
 Built-in themes live beside this module; imported and saved ones in
-``$XDG_CONFIG_HOME/nosonpy/themes``. Nothing here needs Qt.
+``$XDG_CONFIG_HOME/sonolin/themes``. Nothing here needs Qt.
 """
 
 from __future__ import annotations

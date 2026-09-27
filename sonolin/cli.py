@@ -1,16 +1,16 @@
 """Command line controller — the replacement for noson-cli.
 
-    nosonpy discover
-    nosonpy -r "Living Room" status
-    nosonpy -r "Living Room" volume +5
-    nosonpy -r "Living Room" say "Dinner is ready" --volume 35
-    nosonpy -r "Living Room" stream                 # this machine's audio, until Ctrl-C
-    nosonpy -r "Living Room" play-file song.flac    # serves it until Ctrl-C
-    nosonpy -r "Living Room" alarms
-    nosonpy -r "Living Room" diag batterystatus
-    nosonpy -r "Living Room" raw playerVolume getVolume
+    sonolin discover
+    sonolin -r "Living Room" status
+    sonolin -r "Living Room" volume +5
+    sonolin -r "Living Room" say "Dinner is ready" --volume 35
+    sonolin -r "Living Room" stream                 # this machine's audio, until Ctrl-C
+    sonolin -r "Living Room" play-file song.flac    # serves it until Ctrl-C
+    sonolin -r "Living Room" alarms
+    sonolin -r "Living Room" diag batterystatus
+    sonolin -r "Living Room" raw playerVolume getVolume
 
-Set NOSONPY_ROOM to skip ``-r`` every time.
+Set SONOLIN_ROOM to skip ``-r`` every time.
 
 Anything the speaker has to fetch from this machine — a local file, a spoken
 clip, the desktop stream — is served by this process, so those commands stay
@@ -56,7 +56,7 @@ def _bool(text: str) -> bool:
 def _resolve(args, controller: Controller | None = None) -> Speaker:
     if args.ip:
         return Speaker(args.ip)
-    room = args.room or os.environ.get("NOSONPY_ROOM")
+    room = args.room or os.environ.get("SONOLIN_ROOM")
     if room:
         try:
             return by_name(room, timeout=args.timeout)
@@ -101,8 +101,8 @@ def _serve_until_interrupted(message: str, on_stop=None) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    ap = argparse.ArgumentParser(prog="nosonpy", description="Control Sonos players.")
-    ap.add_argument("-r", "--room", help="room name (or set NOSONPY_ROOM)")
+    ap = argparse.ArgumentParser(prog="sonolin", description="Control Sonos players.")
+    ap.add_argument("-r", "--room", help="room name (or set SONOLIN_ROOM)")
     ap.add_argument("-i", "--ip", help="player address, skipping discovery")
     ap.add_argument("-t", "--timeout", type=int, default=5, help="discovery timeout in seconds")
     ap.add_argument("-v", "--verbose", action="store_true")

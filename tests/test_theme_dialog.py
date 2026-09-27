@@ -6,8 +6,8 @@ pytest.importorskip("PyQt6")
 
 from PyQt6.QtWidgets import QApplication, QMessageBox  # noqa: E402
 
-from nosonpy.gui import themes  # noqa: E402
-from nosonpy.gui.theme_dialog import ThemeDialog  # noqa: E402
+from sonolin.gui import themes  # noqa: E402
+from sonolin.gui.theme_dialog import ThemeDialog  # noqa: E402
 
 
 class Window:

@@ -13,9 +13,9 @@ def app():
 
 
 def test_toggle_returns_to_the_favourite_on_each_side(app):
-    from nosonpy.controller import Controller
-    from nosonpy.gui import style, themes
-    from nosonpy.gui.app import MainWindow
+    from sonolin.controller import Controller
+    from sonolin.gui import style, themes
+    from sonolin.gui.app import MainWindow
 
     c = Controller([])
     w = MainWindow(c)

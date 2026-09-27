@@ -1,6 +1,6 @@
 import json
 
-from nosonpy.config import Config, config_path
+from sonolin.config import Config, config_path
 
 
 def test_missing_file_gives_defaults(xdg):
@@ -16,7 +16,7 @@ def test_round_trip(xdg):
     again = Config.load()
     assert again.speakers[0].name == "Kitchen"
     assert again.stream_format == "mp3"
-    assert config_path().parent == xdg / "nosonpy"
+    assert config_path().parent == xdg / "sonolin"
 
 
 def test_new_dhcp_lease_updates_rather_than_duplicates(xdg):

@@ -2,7 +2,7 @@
 
 No linter is installed on the development machine, and symtable does real
 scope resolution, so this catches the two mistakes that matter most after
-moving code between modules. Usage: python3 tools/lint.py nosonpy/*.py
+moving code between modules. Usage: python3 tools/lint.py sonolin/*.py
 """
 import ast, builtins, sys, symtable
 

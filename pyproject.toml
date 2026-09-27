@@ -3,7 +3,7 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "nosonpy"
+name = "sonolin"
 version = "0.1.0"
 description = "A Python Sonos controller: UPnP and the local WebSocket API behind one object"
 requires-python = ">=3.11"
@@ -14,11 +14,11 @@ dependencies = ["soco>=0.30", "aiohttp>=3.9"]
 gui = ["PyQt6>=6.5"]
 
 [project.scripts]
-nosonpy = "nosonpy.cli:main"
-nosonpy-gui = "nosonpy.gui:main"
+sonolin = "sonolin.cli:main"
+sonolin-gui = "sonolin.gui:main"
 
 [tool.setuptools.packages.find]
-include = ["nosonpy*"]
+include = ["sonolin*"]
 
 [tool.setuptools.package-data]
-"nosonpy.gui" = ["theme_files/*.json", "nosonpy.svg"]
+"sonolin.gui" = ["theme_files/*.json", "sonolin.svg"]

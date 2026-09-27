@@ -14,7 +14,7 @@ data comes back to the GUI thread.
 
 Artwork is fetched by Qt's own network stack straight from the services' image
 servers, asynchronously on the GUI thread, with a disk cache under
-``$XDG_CACHE_HOME/nosonpy/art`` so a page seen once opens instantly afterwards.
+``$XDG_CACHE_HOME/sonolin/art`` so a page seen once opens instantly afterwards.
 """
 
 from __future__ import annotations
@@ -77,7 +77,7 @@ KIND_LABELS = {
 
 def cache_dir() -> Path:
     base = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
-    path = base / "nosonpy" / "art"
+    path = base / "sonolin" / "art"
     path.mkdir(parents=True, exist_ok=True)
     return path
 

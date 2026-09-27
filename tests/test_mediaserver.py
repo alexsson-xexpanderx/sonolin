@@ -4,8 +4,8 @@ from pathlib import Path
 import aiohttp
 import pytest
 
-from nosonpy.library import Library
-from nosonpy.mediaserver import MediaServer, token_for
+from sonolin.library import Library
+from sonolin.mediaserver import MediaServer, token_for
 
 
 def serve(music_dir, check):

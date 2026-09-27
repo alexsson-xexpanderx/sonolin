@@ -7,7 +7,7 @@ pytest.importorskip("PyQt6")
 from PyQt6.QtCore import QCoreApplication, QMetaType  # noqa: E402
 from PyQt6.QtDBus import QDBusObjectPath  # noqa: E402
 
-from nosonpy.gui.mpris import NO_TRACK, Mpris  # noqa: E402
+from sonolin.gui.mpris import NO_TRACK, Mpris  # noqa: E402
 
 
 @pytest.fixture(scope="module")

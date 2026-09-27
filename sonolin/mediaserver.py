@@ -193,7 +193,7 @@ class MediaServer:
     async def _index(self, request: web.Request) -> web.Response:
         stats = self.library.stats()
         return web.json_response({
-            "service": "nosonpy media server",
+            "service": "Sonolin media server",
             "tracks": stats["tracks"],
             "clips": len(self._clips),
             "capture_source": self.capture_source or "(default monitor)",

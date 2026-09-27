@@ -1,6 +1,6 @@
 """Persisted settings: known speakers, music folders, preferences.
 
-Stored as JSON under ``$XDG_CONFIG_HOME/nosonpy/config.json``. The important
+Stored as JSON under ``$XDG_CONFIG_HOME/sonolin/config.json``. The important
 entry is the speaker list. SSDP discovery only finds players that are awake, and
 a battery Move or Roam spends much of its life asleep; without a memory of it,
 the app would forget the speaker exists every time it dozes off. noson-app gets
@@ -21,7 +21,7 @@ log = logging.getLogger(__name__)
 
 def config_path() -> Path:
     base = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
-    return base / "nosonpy" / "config.json"
+    return base / "sonolin" / "config.json"
 
 
 @dataclass

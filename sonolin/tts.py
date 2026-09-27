@@ -50,7 +50,7 @@ async def synthesise(
         )
     if not text.strip():
         raise ValueError("nothing to say")
-    with tempfile.TemporaryDirectory(prefix="nosonpy-tts-") as tmp:
+    with tempfile.TemporaryDirectory(prefix="sonolin-tts-") as tmp:
         out = Path(tmp) / "clip.wav"
         cmd = ENGINES[name](text, out, voice, wpm)
         proc = await asyncio.create_subprocess_exec(

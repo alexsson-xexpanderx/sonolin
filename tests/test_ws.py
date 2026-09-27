@@ -6,7 +6,7 @@ import json
 import pytest
 from aiohttp import WSMsgType, web
 
-from nosonpy.ws import API_KEY, SUBPROTOCOL, SonosWebSocket, SonosWebSocketError
+from sonolin.ws import API_KEY, SUBPROTOCOL, SonosWebSocket, SonosWebSocketError
 
 
 async def fake_player(request: web.Request) -> web.WebSocketResponse:

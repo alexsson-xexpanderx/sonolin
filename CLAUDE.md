@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-nosonpy is a Python rewrite of noson-app (`/home/alexsson/git/noson-app`, C++/QML). The README
+Sonolin is a Python rewrite of noson-app (`/home/alexsson/git/noson-app`, C++/QML). The README
 covers features and the user-facing picture; this file covers what is needed to change the code.
 
 ## Commands
@@ -10,9 +10,9 @@ covers features and the user-facing picture; this file covers what is needed to 
 ```bash
 python3 -m pytest                                    # all tests, <1 s, no speaker needed
 python3 -m pytest tests/test_mediaserver.py -k range # one test
-python3 tools/lint.py nosonpy/*.py nosonpy/gui/*.py tests/*.py
-python3 -m nosonpy.cli -i 192.168.1.14 status        # CLI without installing
-nosonpy-gui                                          # after `pip install -e '.[gui]'`
+python3 tools/lint.py sonolin/*.py sonolin/gui/*.py tests/*.py
+python3 -m sonolin.cli -i 192.168.1.14 status        # CLI without installing
+sonolin-gui                                          # after `pip install -e '.[gui]'`
 ```
 
 No linter is installed on this machine; `tools/lint.py` is a symtable-based stand-in for
@@ -20,7 +20,7 @@ pyflakes (undefined names, unused imports). Run it after moving code between mod
 
 GUI checks run headless: `QT_QPA_PLATFORM=offscreen`, pump the event loop, and `window.grab()`
 to a PNG. Point `XDG_CONFIG_HOME` at a scratch directory first so the user's real
-`~/.config/nosonpy` is not touched.
+`~/.config/sonolin` is not touched.
 
 ## Architecture
 
@@ -83,7 +83,7 @@ Each of these was found by testing against real hardware; the code comments say 
 - **MPRIS wire types**: `mpris:length` and `Position` must be int64, `mpris:trackid` an object
   path, `PropertiesChanged`'s third argument an `as` even when empty. PyQt picks D-Bus types
   from Python values, so `gui/mpris.py` builds these explicitly. Verify with
-  `gdbus call --session --dest org.mpris.MediaPlayer2.nosonpy ...`, which prints each type.
+  `gdbus call --session --dest org.mpris.MediaPlayer2.sonolin ...`, which prints each type.
 - **A short-lived process must not stop the media server before the speaker fetches from it.**
   The CLI's `say` waits on `MediaServer.wait_fetched`.
 
@@ -99,7 +99,7 @@ The user has one Sonos Move ("Living Room", 192.168.1.14) in their home.
 - Playlist writes are tested on a temporary playlist created for the test and removed after
   it, checking its title first; the user's own playlists are never modified.
 - Service-browser tests need the user's service link. **Symlink** (never copy)
-  `~/.config/nosonpy/service_tokens.json` into the scratch `XDG_CONFIG_HOME`: SoCo saves refreshed
+  `~/.config/sonolin/service_tokens.json` into the scratch `XDG_CONFIG_HOME`: SoCo saves refreshed
   tokens back to the store, and a refresh written to a copy would leave the real token stale.
   Remove the link afterwards.
 - Do not create or change alarms, group or pair speakers, rename rooms or link music-service
@@ -109,7 +109,7 @@ The user has one Sonos Move ("Living Room", 192.168.1.14) in their home.
 ## Themes
 
 `gui/themes.py` (no Qt) defines the sixteen colour roles, the Dark and Light palettes, and theme
-files: built-ins in `gui/theme_files/`, the user's in `$XDG_CONFIG_HOME/nosonpy/themes/`.
+files: built-ins in `gui/theme_files/`, the user's in `$XDG_CONFIG_HOME/sonolin/themes/`.
 `style.apply(app, colors)` swaps `style.C` **in place** and rebuilds the stylesheet from
 `style.sheet()`. Anything painted by hand must therefore read `style.C[...]` at paint time,
 never capture a colour ahead of time: speaker rows store their *state* and look its colour up

@@ -1,13 +1,13 @@
-<img src="data/icons/nosonpy.svg" width="96" align="right" alt="">
+<img src="data/icons/sonolin.svg" width="96" align="right" alt="">
 
-# nosonpy
+# Sonolin
 
 A Sonos controller for the Linux desktop, written entirely in Python. It replaces
 [noson-app](https://github.com/janbar/noson-app) — about 82,000 lines of C++,
 QML and libnoson — with roughly 6,000 lines of Python, and reaches parts of
 Sonos that noson-app never did.
 
-![nosonpy](docs/queue.png)
+![Sonolin](docs/queue.png)
 
 ## Install
 
@@ -28,30 +28,30 @@ audio sources.
 To put it in your application menu, with its icon:
 
 ```bash
-python3 -m nosonpy.desktop install
+python3 -m sonolin.desktop install
 ```
 
 This installs for your user only, into `~/.local/share`, and refreshes the menu
-(KDE, GNOME and others). `python3 -m nosonpy.desktop uninstall` takes it out again.
+(KDE, GNOME and others). `python3 -m sonolin.desktop uninstall` takes it out again.
 
 ## Run it
 
 ```bash
-nosonpy-gui
+sonolin-gui
 ```
 
-Or from a terminal. Set `NOSONPY_ROOM` once and skip `-r` from then on:
+Or from a terminal. Set `SONOLIN_ROOM` once and skip `-r` from then on:
 
 ```bash
-nosonpy discover
-nosonpy -r "Living Room" status
-nosonpy -r "Living Room" volume +5
-nosonpy -r "Living Room" radio "jazz24"
-nosonpy -r "Living Room" say "Dinner is ready" --volume 35
-nosonpy -r "Living Room" stream                  # this computer's audio, until Ctrl-C
-nosonpy -r "Living Room" play-file song.flac     # served from here until Ctrl-C
-nosonpy -r "Living Room" alarm-add 07:00 --repeat WEEKDAYS
-nosonpy --help                                   # 53 commands
+sonolin discover
+sonolin -r "Living Room" status
+sonolin -r "Living Room" volume +5
+sonolin -r "Living Room" radio "jazz24"
+sonolin -r "Living Room" say "Dinner is ready" --volume 35
+sonolin -r "Living Room" stream                  # this computer's audio, until Ctrl-C
+sonolin -r "Living Room" play-file song.flac     # served from here until Ctrl-C
+sonolin -r "Living Room" alarm-add 07:00 --repeat WEEKDAYS
+sonolin --help                                   # 53 commands
 ```
 
 ## What it does
@@ -113,7 +113,7 @@ Synthwave. The toggle remembers your favourite on each side, so a custom dark
 theme survives a trip to light mode.
 
 **Sleeping speakers.** A Move or Roam drops off the network when idle, so
-discovery cannot see it. nosonpy remembers every speaker it has found, shows a
+discovery cannot see it. Sonolin remembers every speaker it has found, shows a
 sleeping one as asleep instead of forgetting it, and picks it up again when it
 wakes. Speakers discovery cannot reach at all, for instance across a VLAN, can
 be added by address.
@@ -135,7 +135,7 @@ comes from the `base` palette (`dark` or `light`), so this is a complete theme:
 }
 ```
 
-Import it with *Themes… › Import…*, or drop it into `~/.config/nosonpy/themes/`.
+Import it with *Themes… › Import…*, or drop it into `~/.config/sonolin/themes/`.
 To see every colour you can set, export any theme: exported files list all
 sixteen, each described by name in the editor (`bg`, `surface`, `accent`,
 `selection_text` and so on). A file with a mistake is refused with the reason,
@@ -145,17 +145,17 @@ such as the line of a JSON error or which value is not a colour.
 
 Sonos speakers fetch media themselves over HTTP. They cannot read your disk, so
 anything local — a music file, its cover art, a spoken announcement, the desktop
-stream — is published by a small web server inside nosonpy.
+stream — is published by a small web server inside Sonolin.
 
 - It listens on **TCP 1405**, inside the 1400–1410 range noson-app's README asks
   you to open, so an existing firewall rule already covers it. If 1405 is taken
   it falls back to a random port.
 - It only serves files in your scanned library, each under an opaque id. There
   is no URL that takes a file path, so nothing else on the disk is reachable.
-- It has no password, because speakers have no way to send one. While nosonpy
+- It has no password, because speakers have no way to send one. While Sonolin
   runs, anything on your local network can fetch your indexed music and cover
   art.
-- A queued local track only plays while nosonpy is running. `nosonpy serve`
+- A queued local track only plays while Sonolin is running. `sonolin serve`
   keeps the server up without the GUI.
 
 ## The four ways to control a Sonos
@@ -174,7 +174,7 @@ pairing, battery, balance, the home-theatre settings, status light, button lock.
 
 The modern Sonos Control API, spoken directly to the speaker with no cloud
 account and no developer registration. Neither libnoson nor SoCo implements it;
-`nosonpy/ws.py` does. It is the only route to:
+`sonolin/ws.py` does. It is the only route to:
 
 - **`audioClip`** — play a clip *over* the music. The music ducks, the clip
   plays, the music returns. The usual trick for doorbells and text-to-speech is
@@ -183,16 +183,16 @@ account and no developer registration. Neither libnoson nor SoCo implements it;
   `clipType: CHIME` plays a sound built into the speaker, with no URL at all.
 - **`playerVolume` duck and unduck**, and **`homeTheater`** options.
 
-`nosonpy raw <namespace> <command> '<json>'` sends any command, for exploring.
+`sonolin raw <namespace> <command> '<json>'` sends any command, for exploring.
 One quirk: a group has a different id here than over UPnP, so it has to be read
 from the `groups` namespace rather than built.
 
 ### 3. Diagnostic pages, port 1400
 
-Undocumented, and listed by `nosonpy diag`. On a Move running firmware 97.1:
+Undocumented, and listed by `sonolin diag`. On a Move running firmware 97.1:
 `batterystatus`, `enetports`, `leds` (the recent LED pattern history),
 `wireless`, `zp`, `VERSION`, `proc/ath_rincon/status`, `ifconfig` and `showstp`.
-`nosonpy diag <page>` prints one.
+`sonolin diag <page>` prints one.
 
 ### 4. What had to be built from scratch
 
@@ -207,10 +207,10 @@ Everything noson-app does on the Linux desktop is here, except:
   but desktop streaming relies on PulseAudio or PipeWire.
 - **Translations.** English only.
 - **Artist pictures for local music.** noson-app fetches them from Deezer and
-  Last.fm. nosonpy uses the art embedded in files and `cover.jpg`-style files
+  Last.fm. Sonolin uses the art embedded in files and `cover.jpg`-style files
   beside them.
 - **Saving a stream as a radio station, or anything as a new favourite.** Any
-  stream URL can be played with `nosonpy uri`, but not saved.
+  stream URL can be played with `sonolin uri`, but not saved.
 - **Separate volume sliders for each room in a group.** There is one volume
   control that acts on either the speaker or the whole group.
 
@@ -236,7 +236,7 @@ a second speaker.
 
 ```bash
 python3 -m pytest              # 117 tests, about a second, no speaker needed
-python3 tools/lint.py nosonpy/*.py nosonpy/gui/*.py tests/*.py
+python3 tools/lint.py sonolin/*.py sonolin/gui/*.py tests/*.py
 ```
 
 `ffmpeg` is needed to generate the test audio; tests that use it are skipped
@@ -251,12 +251,12 @@ without it.
 | `library.py`, `tags.py` | scanning and reading local audio files |
 | `services.py` | music-service browse, search, linking and playing |
 | `tts.py`, `events.py`, `config.py`, `alarms.py` | speech, pushed state, settings, alarm codes |
-| `cli.py` | the `nosonpy` command |
+| `cli.py` | the `sonolin` command |
 | `desktop.py` | adds and removes the application-menu entry and icon |
 | `gui/` | the PyQt6 window, its panels, the service browser, themes and their editor, MPRIS, and the thread-pool helper |
 
-Settings live in `~/.config/nosonpy/config.json`; music-service tokens beside it
-in `service_tokens.json`. Artwork is cached in `~/.cache/nosonpy/art` (up to
+Settings live in `~/.config/sonolin/config.json`; music-service tokens beside it
+in `service_tokens.json`. Artwork is cached in `~/.cache/sonolin/art` (up to
 250 MB).
 
 ## Licence

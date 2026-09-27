@@ -1,11 +1,11 @@
 [Desktop Entry]
 Type=Application
-Name=nosonpy
+Name=Sonolin
 GenericName=Sonos controller
 Comment=Control Sonos speakers, stream this computer's audio to them
-Exec=nosonpy-gui
-Icon=nosonpy
+Exec=sonolin-gui
+Icon=sonolin
 Terminal=false
 Categories=AudioVideo;Audio;Player;
 Keywords=sonos;speaker;music;radio;
-StartupWMClass=nosonpy
+StartupWMClass=sonolin

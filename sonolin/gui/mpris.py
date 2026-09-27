@@ -24,7 +24,7 @@ from PyQt6.QtDBus import (
 
 log = logging.getLogger(__name__)
 
-SERVICE = "org.mpris.MediaPlayer2.nosonpy"
+SERVICE = "org.mpris.MediaPlayer2.sonolin"
 PATH = "/org/mpris/MediaPlayer2"
 ROOT_IFACE = "org.mpris.MediaPlayer2"
 PLAYER_IFACE = "org.mpris.MediaPlayer2.Player"
@@ -124,11 +124,11 @@ class RootAdaptor(QDBusAbstractAdaptor):
 
     @pyqtProperty(str)
     def Identity(self) -> str:
-        return "nosonpy"
+        return "Sonolin"
 
     @pyqtProperty(str)
     def DesktopEntry(self) -> str:
-        return "nosonpy"
+        return "sonolin"
 
     @pyqtProperty("QStringList")
     def SupportedUriSchemes(self) -> list[str]:
@@ -362,7 +362,7 @@ class Mpris(QObject):
                 title, artist, album, art, uri)
             self.length = length
             # A fresh id per track is how a client knows the track changed.
-            self.track_id = f"/org/nosonpy/track/{abs(hash((title, artist, album, uri)))}"
+            self.track_id = f"/org/sonolin/track/{abs(hash((title, artist, album, uri)))}"
             changed["Metadata"] = self.metadata()
             changed["CanSeek"] = has_speaker and length > 0
 

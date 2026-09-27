@@ -1,14 +1,14 @@
-"""Put nosonpy in the desktop's application menu, or take it out again.
+"""Put Sonolin in the desktop's application menu, or take it out again.
 
-    python3 -m nosonpy.desktop install
-    python3 -m nosonpy.desktop uninstall
+    python3 -m sonolin.desktop install
+    python3 -m sonolin.desktop uninstall
 
 Installs for the current user only, into ``$XDG_DATA_HOME`` (normally
 ``~/.local/share``): a menu entry in ``applications/`` and the icon in the
 ``hicolor`` theme, then asks the desktop to re-read its menus. Nothing outside
 the home directory is touched, so no root is needed.
 
-The entry runs ``nosonpy-gui`` by its full path, because a program started from
+The entry runs ``sonolin-gui`` by its full path, because a program started from
 the menu does not always get ``~/.local/bin`` on its search path.
 """
 
@@ -20,12 +20,12 @@ import subprocess
 import sys
 from pathlib import Path
 
-APP_ID = "nosonpy"  # must equal QGuiApplication.desktopFileName, see gui/app.py
-ICON = Path(__file__).parent / "gui" / "nosonpy.svg"
+APP_ID = "sonolin"  # must equal QGuiApplication.desktopFileName, see gui/app.py
+ICON = Path(__file__).parent / "gui" / "sonolin.svg"
 
 ENTRY = """[Desktop Entry]
 Type=Application
-Name=nosonpy
+Name=Sonolin
 GenericName=Sonos Controller
 Comment=Control your Sonos speakers and stream this computer's audio to them
 Exec={exe}
@@ -52,11 +52,11 @@ def icon_path() -> Path:
 
 
 def find_launcher() -> str:
-    exe = shutil.which("nosonpy-gui")
+    exe = shutil.which("sonolin-gui")
     if exe:
         return exe
     # Not on PATH: fall back to running the module with this interpreter.
-    return f"{sys.executable} -m nosonpy.gui"
+    return f"{sys.executable} -m sonolin.gui"
 
 
 def _refresh(notes: list[str]) -> None:

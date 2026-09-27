@@ -349,7 +349,7 @@ class Controller:
         wav = _Loop.submit(tts.synthesise(text, voice=voice, wpm=wpm))
         url = server.add_clip(wav, "audio/wav", "wav")
         self.last_clip_url = url
-        return speaker.announce(url, volume=volume, name="nosonpy speech")
+        return speaker.announce(url, volume=volume, name="Sonolin speech")
 
     def wait_clip_fetched(self, timeout: float = 20.0) -> bool:
         """Block until the speaker has fetched the most recent clip."""
@@ -360,7 +360,7 @@ class Controller:
 
     def notify(self, speaker: Speaker, url: str, *, volume: int | None = None) -> dict:
         """Play an arbitrary sound over the music."""
-        return speaker.announce(url, volume=volume, name="nosonpy notification")
+        return speaker.announce(url, volume=volume, name="Sonolin notification")
 
     # -- live state --------------------------------------------------------
 

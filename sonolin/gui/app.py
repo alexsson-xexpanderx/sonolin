@@ -141,7 +141,7 @@ class MainWindow(QMainWindow):
         self._states: dict[str, str] = {}
         self._groups: dict[str, str] = {}
 
-        self.setWindowTitle("nosonpy")
+        self.setWindowTitle("Sonolin")
         self.resize(1260, 820)
         self.setMinimumSize(QSize(980, 640))
         self.speaker_event.connect(self._on_speaker_event)
@@ -1099,9 +1099,10 @@ class MainWindow(QMainWindow):
 def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     app = QApplication(argv if argv is not None else sys.argv)
-    app.setApplicationName("nosonpy")
-    app.setDesktopFileName("nosonpy")  # ties windows to nosonpy.desktop on Wayland
-    app.setWindowIcon(QIcon(str(Path(__file__).with_name("nosonpy.svg"))))
+    app.setApplicationName("sonolin")
+    app.setApplicationDisplayName("Sonolin")
+    app.setDesktopFileName("sonolin")  # ties windows to sonolin.desktop on Wayland
+    app.setWindowIcon(QIcon(str(Path(__file__).with_name("sonolin.svg"))))
     controller = Controller()
     saved = themes.find(controller.config.theme) or themes.builtin_themes()[0]
     style.apply(app, saved.colors)

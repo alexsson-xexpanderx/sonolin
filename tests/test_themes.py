@@ -2,8 +2,8 @@ import json
 
 import pytest
 
-from nosonpy.gui import themes
-from nosonpy.gui.themes import DARK, KEYS, LIGHT, ThemeError
+from sonolin.gui import themes
+from sonolin.gui.themes import DARK, KEYS, LIGHT, ThemeError
 
 
 def test_built_in_themes_are_complete_and_valid():
@@ -92,7 +92,7 @@ def test_built_ins_cannot_be_saved_over_or_deleted():
 
 def test_every_theme_renders_a_stylesheet():
     pytest.importorskip("PyQt6")
-    from nosonpy.gui import style
+    from sonolin.gui import style
 
     saved = dict(style.C)
     try:

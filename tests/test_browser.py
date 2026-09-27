@@ -9,10 +9,10 @@ pytest.importorskip("PyQt6")
 from PyQt6.QtGui import QColor, QImage, QPainter  # noqa: E402
 from PyQt6.QtWidgets import QApplication  # noqa: E402
 
-from nosonpy.gui.browser import (  # noqa: E402
+from sonolin.gui.browser import (  # noqa: E402
     Browser, _is_icon, fmt_duration, track_id_from_uri,
 )
-from nosonpy.services import Entry, ServiceInfo  # noqa: E402
+from sonolin.services import Entry, ServiceInfo  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -105,7 +105,7 @@ def test_menu_for_several_songs_skips_navigation(app):
 def test_card_titles_wrap_instead_of_hiding_the_difference(app):
     from PyQt6.QtGui import QFont, QFontMetrics
 
-    from nosonpy.gui.browser import _two_lines
+    from sonolin.gui.browser import _two_lines
     fm = QFontMetrics(QFont())
     width = fm.horizontalAdvance("Discover Weekly") + 4
     assert _two_lines(fm, "Discover Weekly", width) == ["Discover Weekly"]

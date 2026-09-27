@@ -55,7 +55,7 @@ class _Loop:
             if cls._loop is None or cls._loop.is_closed():
                 cls._loop = asyncio.new_event_loop()
                 threading.Thread(
-                    target=cls._loop.run_forever, name="nosonpy-aio", daemon=True
+                    target=cls._loop.run_forever, name="sonolin-aio", daemon=True
                 ).start()
             return cls._loop
 
@@ -182,7 +182,7 @@ class Speaker:
         url: str | None = None,
         *,
         volume: int | None = None,
-        name: str = "nosonpy",
+        name: str = "Sonolin",
         clip_type: str | None = None,
     ) -> dict:
         """Play a short clip over whatever is already playing.
@@ -195,7 +195,7 @@ class Speaker:
         This is only available over the websocket tier. Players report
         ``AUDIO_CLIP`` in `capabilities` when they support it.
         """
-        body: dict[str, Any] = {"name": name, "appId": "com.nosonpy.control"}
+        body: dict[str, Any] = {"name": name, "appId": "com.sonolin.control"}
         if clip_type:
             body["clipType"] = clip_type
         if url:

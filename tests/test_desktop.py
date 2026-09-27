@@ -3,7 +3,7 @@ import subprocess
 
 import pytest
 
-from nosonpy import desktop
+from sonolin import desktop
 
 
 @pytest.fixture
@@ -15,27 +15,27 @@ def home(tmp_path, monkeypatch):
 
 def test_install_and_uninstall(home, monkeypatch):
     monkeypatch.setattr(desktop.shutil, "which",
-                        lambda name: "/opt/bin/nosonpy-gui" if name == "nosonpy-gui" else None)
+                        lambda name: "/opt/bin/sonolin-gui" if name == "sonolin-gui" else None)
     desktop.install()
-    entry = (home / "applications" / "nosonpy.desktop").read_text()
-    assert "Exec=/opt/bin/nosonpy-gui" in entry and "Icon=nosonpy" in entry
-    assert "StartupWMClass=nosonpy" in entry, "must match the app's desktop file name"
-    icon = home / "icons/hicolor/scalable/apps/nosonpy.svg"
+    entry = (home / "applications" / "sonolin.desktop").read_text()
+    assert "Exec=/opt/bin/sonolin-gui" in entry and "Icon=sonolin" in entry
+    assert "StartupWMClass=sonolin" in entry, "must match the app's desktop file name"
+    icon = home / "icons/hicolor/scalable/apps/sonolin.svg"
     assert icon.read_bytes() == desktop.ICON.read_bytes()
     desktop.uninstall()
-    assert not icon.exists() and not (home / "applications" / "nosonpy.desktop").exists()
+    assert not icon.exists() and not (home / "applications" / "sonolin.desktop").exists()
 
 
 def test_falls_back_to_the_module_when_not_on_path(home, monkeypatch):
     monkeypatch.setattr(desktop.shutil, "which", lambda name: None)
     desktop.install()
-    assert "-m nosonpy.gui" in (home / "applications" / "nosonpy.desktop").read_text()
+    assert "-m sonolin.gui" in (home / "applications" / "sonolin.desktop").read_text()
 
 
 @pytest.mark.skipif(shutil.which("desktop-file-validate") is None, reason="validator not installed")
 def test_entry_is_valid(home):
     desktop.install()
-    out = subprocess.run(["desktop-file-validate", str(home / "applications/nosonpy.desktop")],
+    out = subprocess.run(["desktop-file-validate", str(home / "applications/sonolin.desktop")],
                          capture_output=True, text=True)
     assert out.returncode == 0 and out.stdout.strip() == "", out.stdout
 

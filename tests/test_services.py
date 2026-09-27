@@ -1,7 +1,7 @@
 import xml.etree.ElementTree as ET
 from types import SimpleNamespace
 
-from nosonpy.services import BROADCAST_PREFIX, Services, ServiceInfo
+from sonolin.services import BROADCAST_PREFIX, Services, ServiceInfo
 
 
 def item(kind, **meta):
@@ -77,7 +77,7 @@ def _ms_item(title, **meta):
 
 
 def test_describe_track_gathers_track_metadata():
-    from nosonpy.services import describe
+    from sonolin.services import describe
     e = describe(_ms_item("Midnight City", id="spotify:track:X", item_type="track", track={
         "artist": "M83", "album": "Hurry up", "duration": "243", "track_number": "2",
         "album_art_uri": "https://i/art", "artist_id": "spotify:artist:A",
@@ -89,7 +89,7 @@ def test_describe_track_gathers_track_metadata():
 
 
 def test_describe_kinds():
-    from nosonpy.services import describe
+    from sonolin.services import describe
     artist = describe(_ms_item("M83", item_type="artist", can_play="False", can_enumerate="True"))
     album = describe(_ms_item("Junk", item_type="album", artist="M83", can_play="True"))
     playlist = describe(_ms_item("Chill", item_type="playlist", artist="Spotify"))
@@ -103,7 +103,7 @@ def test_describe_kinds():
 
 
 def test_bad_numbers_do_not_raise():
-    from nosonpy.services import describe
+    from sonolin.services import describe
     e = describe(_ms_item("x", item_type="track", track={"duration": "n/a", "track_number": "?"}))
     assert (e.duration, e.number) == (0.0, 0)
 
@@ -150,7 +150,7 @@ def test_radio_never_goes_into_a_playlist():
 
 
 def test_personal_playlists_are_told_apart_from_editorial_ones():
-    from nosonpy.services import describe, is_personal
+    from sonolin.services import describe, is_personal
 
     def make(pid):
         return describe(_ms_item("x", item_type="playlist", id=f"spotify:playlist:{pid}"))
@@ -216,3 +216,16 @@ def test_radio_plays_without_touching_the_queue(monkeypatch):
     radio.desc = "SA_RINCON65031_"
     svc.play_context("TuneIn", SimpleNamespace(soco=soco), [radio])
     assert calls == [("play_uri", "Jazz24")]
+
+
+
+def test_token_file_is_private(tmp_path, monkeypatch):
+    import stat
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    from sonolin.services import token_path
+    Services().store
+    assert stat.S_IMODE(token_path().stat().st_mode) == 0o600
+    token_path().chmod(0o644)       # as SoCo used to leave it
+    Services().store
+    assert stat.S_IMODE(token_path().stat().st_mode) == 0o600

@@ -18,6 +18,7 @@ user's browser with the service itself; no password passes through here.
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -156,7 +157,17 @@ class Services:
 
             path = token_path()
             path.parent.mkdir(parents=True, exist_ok=True)
-            self._store = JsonFileTokenStore(str(path), token_collection="nosonpy")
+            # The file holds service authorisations. SoCo creates it with the
+            # default mode, readable by every user on the machine; create it
+            # private first, and tighten one that already exists. A rewrite
+            # keeps the mode it finds.
+            if not path.exists():
+                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(fd, "w") as fh:
+                    fh.write("{}")
+            elif path.stat().st_mode & 0o077:
+                path.chmod(0o600)
+            self._store = JsonFileTokenStore(str(path), token_collection="sonolin")
         return self._store
 
     # -- catalogue ---------------------------------------------------------

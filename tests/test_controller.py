@@ -5,10 +5,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from nosonpy.controller import Controller
-from nosonpy.mediaserver import MediaServer
-from nosonpy.speaker import _Loop
-from nosonpy.tags import Tags
+from sonolin.controller import Controller
+from sonolin.mediaserver import MediaServer
+from sonolin.speaker import _Loop
+from sonolin.tags import Tags
 
 
 @pytest.fixture

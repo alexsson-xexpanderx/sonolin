@@ -1,4 +1,4 @@
-"""nosonpy — a Python Sonos controller, replacing noson-app's C++ core."""
+"""Sonolin — a Python Sonos controller, replacing noson-app's C++ core."""
 
 from .speaker import Speaker, by_name, discover
 from .ws import SonosWebSocket, SonosWebSocketError

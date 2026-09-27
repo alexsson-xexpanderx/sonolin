@@ -1,6 +1,6 @@
 import pytest
 
-from nosonpy import tags
+from sonolin import tags
 
 
 @pytest.mark.parametrize("name", ["a.flac", "b.mp3", "c.m4a", "d.ogg"])

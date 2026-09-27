@@ -8,7 +8,7 @@ pytest.importorskip("PyQt6")
 
 from PyQt6.QtWidgets import QApplication  # noqa: E402
 
-from nosonpy.gui.panels import QueueTab  # noqa: E402
+from sonolin.gui.panels import QueueTab  # noqa: E402
 
 
 @pytest.fixture(scope="module")

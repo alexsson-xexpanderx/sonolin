@@ -51,7 +51,7 @@ def music_dir(tmp_path_factory) -> Path:
 @pytest.fixture(autouse=True)
 def _private_dirs(tmp_path_factory, monkeypatch) -> None:
     """Every test gets throwaway config and cache folders, so none can write to
-    the real ~/.config/nosonpy or ~/.cache/nosonpy (artwork, settings)."""
+    the real ~/.config/sonolin or ~/.cache/sonolin (artwork, settings)."""
     root = tmp_path_factory.mktemp("home")
     monkeypatch.setenv("XDG_CONFIG_HOME", str(root / "config"))
     monkeypatch.setenv("XDG_CACHE_HOME", str(root / "cache"))

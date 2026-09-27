@@ -1043,7 +1043,7 @@ class LinkDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle(f"Link {service}")
         text = QLabel(
-            f"Open this address, log in to {service} there and approve nosonpy. "
+            f"Open this address, log in to {service} there and approve Sonolin. "
             "Your password goes to the service, never to this app. "
             "Then come back and press Done."
         )
