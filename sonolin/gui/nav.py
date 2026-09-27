@@ -126,10 +126,6 @@ class NavDelegate(QStyledItemDelegate):
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QColor(style.C["accent_lo"] if selected else style.C["raised"]))
             painter.drawRoundedRect(card, 9, 9)
-        if selected:  # a bar at the left edge, like the tab underline it replaces
-            painter.setBrush(QColor(style.C["accent"]))
-            painter.drawRoundedRect(QRectF(card.left(), card.top() + 8, 3, card.height() - 16),
-                                    1.5, 1.5)
         colour = style.C["selection_text"] if selected else \
             style.C["text"] if hovered else style.C["muted"]
         pix = icon(index.data(ICON_ROLE), style.C["accent"] if selected else colour, self.ICON)

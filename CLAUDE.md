@@ -11,6 +11,7 @@ covers features and the user-facing picture; this file covers what is needed to 
 python3 -m pytest                                    # all tests, <1 s, no speaker needed
 python3 -m pytest tests/test_mediaserver.py -k range # one test
 python3 tools/lint.py sonolin/*.py sonolin/gui/*.py tests/*.py
+python3 tools/make_icon.py                           # redraw the app icon (both copies)
 python3 -m sonolin.cli -i 192.168.1.14 status        # CLI without installing
 sonolin-gui                                          # after `pip install -e '.[gui]'`
 ```

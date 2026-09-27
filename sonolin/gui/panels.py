@@ -12,7 +12,7 @@ import logging
 import datetime
 from types import SimpleNamespace
 
-from PyQt6.QtCore import QSize, Qt, QTime, QTimer, QUrl, pyqtSignal
+from PyQt6.QtCore import QEvent, QObject, QSize, Qt, QTime, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import (
     QColor, QDesktopServices, QFont, QFontDatabase, QFontMetrics, QIcon, QPixmap,
 )
@@ -48,15 +48,39 @@ def parse_time(text: str) -> float:
     return total
 
 
-def left_align_headers(table: QTableWidget) -> None:
-    """Headings over the left edge of their column, where the cells start.
+def frame_table(table: QTableWidget) -> None:
+    """Fit a table's heading row neatly inside its rounded frame.
 
-    Qt centres table headings by default while cell text starts at the left,
-    so a heading floats in the middle of a wide column, away from what it
-    labels.
+    Headings sit over the left edge of their column, where the cells start; Qt
+    centres them by default, so a heading floats away from what it labels.
+
+    The heading row is left unfilled (see the stylesheet), because Qt draws it
+    as a plain rectangle over the frame's rounded corners. And Qt runs the
+    scroll bar up beside the headings; a cap as tall as the heading row goes
+    above it instead, carrying the heading row's bottom line on to the edge.
     """
-    table.horizontalHeader().setDefaultAlignment(
-        Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+    header = table.horizontalHeader()
+    header.setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+    cap = QWidget()
+    cap.setObjectName("headerCap")
+    cap.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+    cap.setFixedHeight(header.sizeHint().height())
+    table.addScrollBarWidget(cap, Qt.AlignmentFlag.AlignTop)
+    _MatchHeight(header, cap)
+
+
+class _MatchHeight(QObject):
+    """Keeps `follower` as tall as `leader`, which a theme's font can change."""
+
+    def __init__(self, leader: QWidget, follower: QWidget) -> None:
+        super().__init__(follower)
+        self.follower = follower
+        leader.installEventFilter(self)
+
+    def eventFilter(self, obj, event) -> bool:
+        if event.type() == QEvent.Type.Resize:
+            self.follower.setFixedHeight(obj.height())
+        return False
 
 
 class NowPlaying(QWidget):
@@ -478,7 +502,7 @@ class LibraryTab(QWidget):
         self.albums.currentRowChanged.connect(self._album_changed)
 
         self.tracks = QTableWidget(0, 4)
-        left_align_headers(self.tracks)
+        frame_table(self.tracks)
         self.tracks.setHorizontalHeaderLabels(["#", "Title", "Artist", "Length"])
         self.tracks.verticalHeader().setVisible(False)
         self.tracks.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -622,7 +646,7 @@ class QueueTab(QWidget):
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
-        left_align_headers(self.table)
+        frame_table(self.table)
         self.table.setIconSize(QSize(self.ART, self.ART))
         self.table.verticalHeader().setDefaultSectionSize(self.ART + 12)
         self.table.verticalScrollBar().valueChanged.connect(lambda _v: self._fetch_visible_art())
@@ -960,7 +984,7 @@ class AlarmsTab(QWidget):
         super().__init__()
         self._alarms: list = []
         self.table = QTableWidget(0, 5)
-        left_align_headers(self.table)
+        frame_table(self.table)
         self.table.setHorizontalHeaderLabels(["On", "Time", "Repeat", "Room", "Volume"])
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)

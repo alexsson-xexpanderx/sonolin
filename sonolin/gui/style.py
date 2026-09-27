@@ -284,8 +284,14 @@ QListWidget::item:selected, QTableWidget::item:selected {{
 QListWidget::item:hover {{
     background: {C['raised']};
 }}
+QHeaderView, QHeaderView::section {{
+    background: transparent;
+}}
+#headerCap {{
+    background: transparent;
+    border-bottom: 1px solid {C['border']};
+}}
 QHeaderView::section {{
-    background: {C['surface']};
     color: {C['faint']};
     border: none;
     border-bottom: 1px solid {C['border']};

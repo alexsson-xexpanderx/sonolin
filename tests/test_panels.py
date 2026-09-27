@@ -189,3 +189,17 @@ def test_the_top_of_the_screen_is_asked_for_last(app):
     below = q.table.rowAt(q.table.viewport().height() - 1) + 1
     assert loader.asked.index(arts[below]) < loader.asked.index(arts[1]), \
         "rows just off screen go before the visible ones"
+
+
+def test_the_scroll_bar_starts_below_the_headings(app):
+    from PyQt6.QtCore import QPoint
+
+    q = QueueTab()
+    q.load(*_long_queue(60))
+    q.resize(600, 300)
+    q.show()
+    app.processEvents()
+    bar = q.table.verticalScrollBar()
+    assert bar.isVisible()
+    top = bar.mapTo(q.table, QPoint(0, 0)).y()
+    assert top >= q.table.horizontalHeader().height(), "the bar must not run up beside the headings"
