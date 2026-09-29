@@ -1,10 +1,13 @@
 import asyncio
+import hashlib
 from pathlib import Path
+from types import SimpleNamespace
 
 import aiohttp
 import pytest
 
 from sonolin.library import Library
+from sonolin import mediaserver
 from sonolin.mediaserver import MediaServer, token_for
 
 
@@ -87,6 +90,75 @@ def test_clip_publish_and_fetch_notification(music_dir):
         assert await server.wait_fetched(server.base_url + "/clip/unknown.wav", 0.1) is False
 
     serve(music_dir, check)
+
+
+def test_clip_urls_are_private_and_independent(tmp_path):
+    async def check(server, lib, s):
+        data = b"RIFF....WAVE"
+        first = server.add_clip(data)
+        second = server.add_clip(data)
+        assert first != second
+        guessed = hashlib.sha1(data[:4096] + str(len(data)).encode()).hexdigest()[:16]
+        async with s.get(f"{server.base_url}/clip/{guessed}.wav") as r:
+            assert r.status == 404
+        for url in (first, first, second):
+            assert url.endswith(".wav")
+            async with s.get(url) as r:
+                assert r.status == 200
+                assert r.headers["Content-Type"] == "audio/wav"
+                assert r.headers["Cache-Control"] == "no-store"
+                assert await r.read() == data
+            assert await server.wait_fetched(url, 0.1) is True
+            if url == first:
+                assert await server.wait_fetched(second, 0.01) is False
+
+    serve(tmp_path, check)
+
+
+@pytest.mark.parametrize("method", ["get", "head"])
+def test_clip_expires_without_another_publication(tmp_path, monkeypatch, method):
+    now = 1000.0
+    # Replace this module's clock only; asyncio still needs its real clock.
+    monkeypatch.setattr(mediaserver, "time", SimpleNamespace(
+        monotonic=lambda: now, time=lambda: now))
+
+    async def check(server, lib, s):
+        nonlocal now
+        url = server.add_clip(b"private speech")
+        name = url.rsplit("/", 1)[-1]
+        clip = server._clips[name]
+        now += 599
+        async with s.get(url) as r:
+            assert r.status == 200
+            assert await r.read() == b"private speech"
+        clip.fetched.clear()
+        now += 1
+        async with getattr(s, method)(url) as r:
+            assert r.status == 404
+            assert b"private speech" not in await r.read()
+        assert not clip.fetched.is_set()
+        assert name not in server._clips
+        assert await server.wait_fetched(url, 0.01) is False
+
+    serve(tmp_path, check)
+
+
+def test_publishing_prunes_expired_clips(tmp_path, monkeypatch):
+    now = 1000.0
+    monkeypatch.setattr(mediaserver, "time", SimpleNamespace(
+        monotonic=lambda: now, time=lambda: now))
+
+    async def check(server, lib, s):
+        nonlocal now
+        old = server.add_clip(b"old")
+        now += 600
+        fresh = server.add_clip(b"fresh")
+        assert old.rsplit("/", 1)[-1] not in server._clips
+        async with s.get(fresh) as r:
+            assert r.status == 200
+            assert await r.read() == b"fresh"
+
+    serve(tmp_path, check)
 
 
 def test_rescan_is_picked_up(music_dir, tmp_path):

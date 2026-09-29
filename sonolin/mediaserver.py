@@ -23,6 +23,7 @@ import asyncio
 import hashlib
 import logging
 import mimetypes
+import secrets
 import socket
 import time
 from dataclasses import dataclass, field
@@ -34,6 +35,8 @@ from . import tags as tagreader
 from .library import Library
 
 log = logging.getLogger(__name__)
+
+CLIP_TTL = 600  # seconds
 
 CONTENT_TYPES = {
     ".flac": "audio/flac",
@@ -178,13 +181,14 @@ class MediaServer:
     def add_clip(self, data: bytes, content_type: str = "audio/wav", suffix: str = "wav") -> str:
         """Publish a generated clip and return its URL.
 
-        Clips are held in memory and pruned after ten minutes; they exist only
-        long enough for the speaker to fetch them once.
+        Each publication has an unguessable URL valid for ten minutes.
+        Repeat fetches are allowed during that window for speaker retries.
         """
-        name = f"{hashlib.sha1(data[:4096] + str(len(data)).encode()).hexdigest()[:16]}.{suffix}"
-        self._clips[name] = Clip(data, content_type, time.time())
-        cutoff = time.time() - 600
-        for key in [k for k, v in self._clips.items() if v.created < cutoff]:
+        name = f"{secrets.token_urlsafe(32)}.{suffix}"
+        now = time.monotonic()
+        self._clips[name] = Clip(data, content_type, now)
+        cutoff = now - CLIP_TTL
+        for key in [k for k, v in self._clips.items() if v.created <= cutoff]:
             self._clips.pop(key, None)
         return f"{self.base_url}/clip/{name}"
 
@@ -240,13 +244,18 @@ class MediaServer:
                             headers={"Cache-Control": "max-age=86400"})
 
     async def _clip(self, request: web.Request) -> web.StreamResponse:
-        clip = self._clips.get(request.match_info["name"])
+        name = request.match_info["name"]
+        clip = self._clips.get(name)
         if clip is None:
             raise web.HTTPNotFound()
-        log.info("clip %s fetched by %s", request.match_info["name"], request.remote)
+        if time.monotonic() - clip.created >= CLIP_TTL:
+            self._clips.pop(name, None)
+            raise web.HTTPNotFound()
+        # The URL is a bearer capability; keep it out of logs and caches.
+        log.info("clip fetched by %s", request.remote)
         clip.fetched.set()
         return web.Response(body=clip.data, content_type=clip.content_type,
-                            headers={"Accept-Ranges": "bytes"})
+                            headers={"Accept-Ranges": "bytes", "Cache-Control": "no-store"})
 
     async def wait_fetched(self, url: str, timeout: float = 20.0) -> bool:
         """Wait until the speaker has asked for a clip.
