@@ -11,8 +11,8 @@ noson-app that has no counterpart anywhere in the Python Sonos ecosystem.
 
 **Only files present in the library index are reachable.** Paths never appear in
 a URL; each track is addressed by a digest of its path, and a digest that is not
-in the index is a 404. Scanning excludes file symlinks, and indexed paths that
-have become file symlinks are rejected when requested. While this is running, anything on
+in the index is a 404. Scanning excludes file symlinks, and media reads refuse
+symlinks in every path component. While this is running, anything on
 the local network can fetch the indexed audio and art without authenticating —
 the speakers offer no way to present a credential.
 """
@@ -33,6 +33,7 @@ from aiohttp import web
 
 from . import tags as tagreader
 from .library import Library
+from .localfiles import open_regular
 
 log = logging.getLogger(__name__)
 
@@ -95,6 +96,34 @@ class Clip:
     content_type: str
     created: float
     fetched: asyncio.Event = field(default_factory=asyncio.Event)
+
+
+class _LocalFileResponse(web.FileResponse):
+    """Keep aiohttp's Range support while serving a securely opened Linux fd."""
+
+    async def prepare(self, request):
+        if self.prepared:
+            return await web.StreamResponse.prepare(self, request)
+        # aiohttp opens files in an executor. Keep the pinned fd alive even if
+        # the request is cancelled while that worker is still using /proc.
+        task = asyncio.create_task(self._prepare_local(request))
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            await task
+            raise
+
+    async def _prepare_local(self, request):
+        try:
+            source = open_regular(self._path)
+        except OSError:
+            self.set_status(404)
+            return await web.StreamResponse.prepare(self, request)
+        with source:
+            # This descriptor names the opened inode even if its original name
+            # is replaced. Compressed sibling paths cannot select other files.
+            self._path = Path(f"/proc/self/fd/{source.fileno()}")
+            return await super().prepare(request)
 
 
 class MediaServer:
@@ -230,8 +259,8 @@ class MediaServer:
         ctype = CONTENT_TYPES.get(path.suffix.lower()) \
             or mimetypes.guess_type(path.name)[0] or "application/octet-stream"
         # FileResponse implements Range itself, which Sonos relies on to seek.
-        return web.FileResponse(path, headers={"Content-Type": ctype,
-                                               "Accept-Ranges": "bytes"})
+        return _LocalFileResponse(path, headers={"Content-Type": ctype,
+                                                "Accept-Ranges": "bytes"})
 
     async def _art(self, request: web.Request) -> web.StreamResponse:
         token = request.match_info["token"]

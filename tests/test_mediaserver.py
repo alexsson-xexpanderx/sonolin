@@ -148,6 +148,130 @@ def test_explicitly_added_file_outside_roots_is_served(tmp_path):
     serve(music, check)
 
 
+def test_parent_symlink_after_scan_is_not_served(tmp_path):
+    music = tmp_path / "music"
+    album = music / "album"
+    album.mkdir(parents=True)
+    track = album / "song.mp3"
+    track.write_bytes(b"local track")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / track.name).write_bytes(b"private audio")
+    (outside / "cover.jpg").write_bytes(b"private art")
+
+    async def check(server, lib, s):
+        album.rename(music / "old-album")
+        album.symlink_to(outside, target_is_directory=True)
+        for url in (server.music_url(track), server.art_url(track)):
+            async with s.get(url) as r:
+                assert r.status == 404
+                assert b"private" not in await r.read()
+
+    serve(music, check)
+
+
+@pytest.mark.parametrize("when", ["before_open", "after_open"])
+def test_file_swap_during_response(tmp_path, monkeypatch, when):
+    track = tmp_path / "song.mp3"
+    track.write_bytes(b"local track")
+    secret = tmp_path / "private.txt"
+    secret.write_bytes(b"private target")
+    cls = mediaserver._LocalFileResponse if when == "before_open" else mediaserver.web.FileResponse
+    original_prepare = cls.prepare
+
+    async def swap(response, request):
+        track.unlink()
+        track.symlink_to(secret)
+        return await original_prepare(response, request)
+
+    monkeypatch.setattr(cls, "prepare", swap)
+
+    async def check(server, lib, s):
+        async with s.get(server.music_url(track)) as r:
+            assert r.status == (404 if when == "before_open" else 200)
+            body = await r.read()
+            assert b"private target" not in body
+            if when == "after_open":
+                assert body == b"local track"
+
+    serve(tmp_path, check)
+
+
+def test_folder_art_symlink_is_not_served(tmp_path):
+    track = tmp_path / "song.mp3"
+    track.write_bytes(b"local track")
+    secret = tmp_path / "private.txt"
+    secret.write_bytes(b"private target")
+    (tmp_path / "cover.jpg").symlink_to(secret)
+
+    async def check(server, lib, s):
+        async with s.get(server.art_url(track)) as r:
+            assert r.status == 404
+            assert secret.read_bytes() not in await r.read()
+
+    serve(tmp_path, check)
+
+
+def test_head_and_conditional_music_requests(music_dir):
+    async def check(server, lib, s):
+        path = music_dir / "a.flac"
+        url = server.music_url(path)
+        async with s.head(url) as r:
+            assert r.status == 200
+            assert int(r.headers["Content-Length"]) == path.stat().st_size
+            assert await r.read() == b""
+            etag = r.headers["ETag"]
+        async with s.get(url, headers={"If-None-Match": etag}) as r:
+            assert r.status == 304
+            assert await r.read() == b""
+        async with s.get(url, headers={"Range": "bytes=-10"}) as r:
+            assert r.status == 206
+            assert await r.read() == path.read_bytes()[-10:]
+        async with s.get(url, headers={"Range": "bytes=999999999-"}) as r:
+            assert r.status == 416
+
+    serve(music_dir, check)
+
+
+@pytest.mark.parametrize("outcome", ["success", "error", "cancel"])
+def test_response_keeps_descriptor_until_reader_finishes(tmp_path, monkeypatch, outcome):
+    track = tmp_path / "song.mp3"
+    track.write_bytes(b"local track")
+
+    async def check():
+        entered = asyncio.Event()
+        finish = asyncio.Event()
+        pinned = None
+
+        async def prepare(response, request):
+            nonlocal pinned
+            pinned = response._path
+            entered.set()
+            await finish.wait()
+            assert pinned.read_bytes() == b"local track"
+            if outcome == "error":
+                raise RuntimeError("reader failed")
+
+        monkeypatch.setattr(mediaserver.web.FileResponse, "prepare", prepare)
+        response = mediaserver._LocalFileResponse(track)
+        task = asyncio.create_task(response.prepare(None))
+        await asyncio.wait_for(entered.wait(), 5)
+        if outcome == "cancel":
+            task.cancel()
+            await asyncio.sleep(0)
+            assert pinned.read_bytes() == b"local track"
+        finish.set()
+        if outcome == "success":
+            await task
+        else:
+            error = asyncio.CancelledError if outcome == "cancel" else RuntimeError
+            with pytest.raises(error):
+                await task
+        assert not pinned.exists(), "the descriptor must be closed on every exit"
+
+    asyncio.run(check())
+
+
 def test_clip_publish_and_fetch_notification(music_dir):
     async def check(server, lib, s):
         url = server.add_clip(b"RIFF....WAVE", "audio/wav")
