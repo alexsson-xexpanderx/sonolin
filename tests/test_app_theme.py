@@ -131,3 +131,36 @@ def test_there_is_no_toolbar_and_settings_holds_its_actions(app, monkeypatch):
         w.current = None
         w.mpris.unregister()
         style.apply(app, themes.DARK)
+
+
+def test_now_playing_art_uses_application_destinations(app, monkeypatch):
+    from types import SimpleNamespace
+
+    from sonolin.controller import Controller
+    from sonolin.gui import workers
+    from sonolin.gui.app import MainWindow
+
+    c = Controller([])
+    w = MainWindow(c)
+    w.timer.stop()
+    calls = []
+    monkeypatch.setattr(workers, "run", lambda *args, **kw: calls.append((args, kw)))
+    monkeypatch.setattr(w, "_refresh_item", lambda: None)
+    w.current = SimpleNamespace(uid="speaker", ip="192.168.1.20", awake=True)
+    c.server = SimpleNamespace(port=1405, base_url="http://192.168.1.5:1405")
+    try:
+        w._apply_poll({"track": {"album_art": "http://untrusted.example/cover"},
+                       "state": "STOPPED", "volume": 20, "mute": False})
+        assert calls[-1][0] == (w._fetch_art, "http://untrusted.example/cover",
+                               "192.168.1.20", "http://192.168.1.5:1405")
+        assert calls[-1][1]["on_done"] == w.now.set_art
+    finally:
+        c.server = None
+        w.current = None
+        w.mpris.unregister()
+
+
+def test_now_playing_rejected_art_is_nonfatal():
+    from sonolin.gui.app import MainWindow
+
+    assert MainWindow._fetch_art("http://127.0.0.1/private", "192.168.1.20") is None
