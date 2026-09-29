@@ -653,11 +653,6 @@ class QueueTab(QWidget):
     #: Rows beyond the visible ones whose covers are fetched ahead of scrolling.
     ART_MARGIN = 6
 
-    PLAYING = "▶"
-    #: ⏸ with the text-presentation selector, so it is never swapped for an
-    #: emoji picture on systems whose emoji font also covers it.
-    PAUSED = "⏸\ufe0e"
-
     play_index = pyqtSignal(int)
     remove_index = pyqtSignal(int)
     clear_queue = pyqtSignal()
@@ -784,10 +779,10 @@ class QueueTab(QWidget):
                 self.table.setItem(row, col, QTableWidgetItem(value))
             resources = getattr(item, "resources", None) or []
             self._uris.append(resources[0].uri if resources else "")
-        # Wide enough for the playing row's "⏸ 18", so the column does not jump
-        # when the mark moves.
+        # Wide enough for the playing row's number in bold, so the column does
+        # not jump when the mark moves.
         bold = QFont(self.table.font()); bold.setBold(True)
-        widest = f"{self.PAUSED} {max(len(items), 1)}"
+        widest = str(max(len(items), 1))
         self.table.setColumnWidth(0, QFontMetrics(bold).horizontalAdvance(widest) + 28)
         self._playing_row = -1  # every row was just rebuilt unstyled
         self._show_playing()
@@ -832,24 +827,24 @@ class QueueTab(QWidget):
         return bool(a) and a.split("?", 1)[0] == b.split("?", 1)[0]
 
     def _show_playing(self) -> None:
-        position, uri, state = getattr(self, "_now", (0, "", ""))
+        position, uri, _state = getattr(self, "_now", (0, "", ""))
         uris = getattr(self, "_uris", [])
         row = position - 1
         if not (0 <= row < len(uris) and self._same_song(uris[row], uri)):
             row = -1
         previous = getattr(self, "_playing_row", -1)
         if previous != row and 0 <= previous < self.table.rowCount():
-            self._style_row(previous, None)
+            self._style_row(previous, False)
         if row >= 0:
-            self._style_row(row, self.PLAYING if state in ("PLAYING", "TRANSITIONING")
-                            else self.PAUSED)
+            self._style_row(row, True)
             if row != previous:
                 self.table.scrollToItem(self.table.item(row, 1),
                                         QAbstractItemView.ScrollHint.EnsureVisible)
         self._playing_row = row
 
-    def _style_row(self, row: int, glyph: str | None) -> None:
-        on = glyph is not None
+    def _style_row(self, row: int, on: bool) -> None:
+        # Colour and weight alone mark the song; the play/pause button already
+        # says whether it is playing.
         for col in range(self.table.columnCount()):
             item = self.table.item(row, col)
             if item is None:
@@ -859,10 +854,6 @@ class QueueTab(QWidget):
                 item.setForeground(QColor(style.C["accent"]))
             else:
                 item.setData(Qt.ItemDataRole.ForegroundRole, None)
-        number = self.table.item(row, 0)
-        if number is not None:
-            # The mark goes beside the number, not over it.
-            number.setText(f"{glyph} {row + 1}" if on else str(row + 1))
 
     def restyle(self) -> None:
         """Recolour the playing row after a theme change."""

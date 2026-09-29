@@ -33,10 +33,10 @@ def _cell(q, row, col=0):
 def test_marks_the_song_at_the_reported_position(app):
     q = QueueTab(); q.load(_items("A", "B", "C"))
     q.set_playing(2, _uri("B"), "PLAYING")
-    assert q.playing_row == 1 and _cell(q, 1) == "▶ 2", "the number stays beside the mark"
+    assert q.playing_row == 1 and _cell(q, 1) == "2", "no play or pause sign"
     assert q.table.item(1, 1).font().bold()
     q.set_playing(2, _uri("B"), "PAUSED_PLAYBACK")
-    assert _cell(q, 1) == "⏸\ufe0e 2"
+    assert q.playing_row == 1 and _cell(q, 1) == "2"
 
 
 def test_moving_on_restores_the_previous_row(app):
@@ -65,7 +65,7 @@ def test_reload_keeps_the_mark(app):
     q = QueueTab(); q.load(_items("A", "B"))
     q.set_playing(2, _uri("B"), "PLAYING")
     q.load(_items("A", "B", "C"))
-    assert q.playing_row == 1 and _cell(q, 1) == "▶ 2"
+    assert q.playing_row == 1 and q.table.item(1, 1).font().bold()
 
 
 
