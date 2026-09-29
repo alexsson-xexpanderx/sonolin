@@ -56,6 +56,9 @@ STREAM_FORMATS = {
     "wav": (["-f", "wav"], "audio/wav"),
 }
 
+# Bound continuous capture/encoding work across all formats and listeners.
+MAX_LIVE_ENCODERS = 4
+
 
 def token_for(path: str | Path) -> str:
     """A stable, opaque id for a file.
@@ -111,6 +114,7 @@ class MediaServer:
         self.requested_port = port
         self.port: int | None = None
         self.capture_source = capture_source
+        self._live_slots = asyncio.BoundedSemaphore(MAX_LIVE_ENCODERS)
         self._clips: dict[str, Clip] = {}
         self._runner: web.AppRunner | None = None
         self._art_cache: dict[str, tuple[bytes, str]] = {}
@@ -287,6 +291,15 @@ class MediaServer:
         fmt = request.match_info["fmt"].lower()
         if fmt not in STREAM_FORMATS:
             raise web.HTTPNotFound(text=f"unknown format {fmt!r}")
+        # Admission happens before source discovery or process creation. With no
+        # await between this check and an available acquire, requests cannot race
+        # for the last slot on the server's event loop. Reject rather than queue.
+        if self._live_slots.locked():
+            raise web.HTTPServiceUnavailable(text="too many live listeners")
+        async with self._live_slots:
+            return await self._stream_live(request, fmt)
+
+    async def _stream_live(self, request: web.Request, fmt: str) -> web.StreamResponse:
         args, ctype = STREAM_FORMATS[fmt]
         source = self.capture_source or await default_monitor()
         if not source:
@@ -302,14 +315,14 @@ class MediaServer:
         proc = await asyncio.create_subprocess_exec(
             *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
         )
-        response = web.StreamResponse(headers={
-            "Content-Type": ctype,
-            "Cache-Control": "no-cache, no-store",
-            # A live capture has no length and must never be treated as seekable.
-            "Accept-Ranges": "none",
-        })
-        await response.prepare(request)
         try:
+            response = web.StreamResponse(headers={
+                "Content-Type": ctype,
+                "Cache-Control": "no-cache, no-store",
+                # A live capture has no length and must never be treated as seekable.
+                "Accept-Ranges": "none",
+            })
+            await response.prepare(request)
             assert proc.stdout is not None
             while True:
                 chunk = await proc.stdout.read(16384)
@@ -321,12 +334,15 @@ class MediaServer:
         finally:
             if proc.returncode is None:
                 proc.terminate()
-                try:
-                    await asyncio.wait_for(proc.wait(), 3)
-                except asyncio.TimeoutError:
-                    proc.kill()
-            if proc.stderr is not None:
-                err = (await proc.stderr.read()).decode("utf-8", "replace").strip()
+            # Drain both pipes while reaping the encoder, so a full pipe cannot
+            # block shutdown. Keep the admission slot until the process exits.
+            try:
+                _, stderr = await asyncio.wait_for(proc.communicate(), 3)
+            except asyncio.TimeoutError:
+                proc.kill()
+                _, stderr = await proc.communicate()
+            if stderr:
+                err = stderr.decode("utf-8", "replace").strip()
                 if err:
                     log.warning("ffmpeg: %s", err)
         return response

@@ -266,3 +266,149 @@ def test_busy_port_falls_back_to_a_free_one(music_dir):
             await second.stop(); await first.stop()
 
     asyncio.run(main())
+
+
+@pytest.mark.parametrize("stage", ["discovery", "spawn", "stream", "cleanup"])
+def test_live_admission_limit(monkeypatch, stage):
+    """Held requests share one limit, including while startup is still pending."""
+    from unittest.mock import AsyncMock, Mock
+    from sonolin import mediaserver
+
+    async def main():
+        gate = asyncio.Event()
+        full = asyncio.Event()
+        calls = 0
+        processes = []
+
+        async def block_startup():
+            nonlocal calls
+            calls += 1
+            if calls == mediaserver.MAX_LIVE_ENCODERS:
+                full.set()
+            await gate.wait()
+
+        async def monitor():
+            if stage == "discovery":
+                await block_startup()
+            return "test.monitor"
+
+        async def communicate():
+            if stage == "cleanup":
+                await block_startup()
+            return b"", b""
+
+        async def spawn(*args, **kwargs):
+            if stage == "spawn":
+                await block_startup()
+            stdout = asyncio.StreamReader()
+            proc = Mock(stdout=stdout, returncode=None,
+                        communicate=AsyncMock(side_effect=communicate))
+            processes.append(proc)
+            return proc
+
+        monkeypatch.setattr(mediaserver, "default_monitor", monitor)
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+        server = MediaServer(host="127.0.0.1")
+        await server.start()
+        requests = []
+        responses = []
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5)) as s:
+                formats = list(mediaserver.STREAM_FORMATS)
+                requests = [asyncio.create_task(s.get(server.stream_url(formats[i % 3])))
+                            for i in range(mediaserver.MAX_LIVE_ENCODERS)]
+                if stage in ("stream", "cleanup"):
+                    responses = await asyncio.gather(*requests)
+                    assert all(r.status == 200 for r in responses)
+                    if stage == "cleanup":
+                        for proc in processes:
+                            proc.stdout.feed_eof()
+                        await asyncio.wait_for(full.wait(), 5)
+                else:
+                    await asyncio.wait_for(full.wait(), 5)
+                for method, fmt in [("GET", "flac"), ("GET", "mp3"), ("HEAD", "wav")]:
+                    async with s.request(method, server.stream_url(fmt)) as r:
+                        assert r.status == 503
+                assert len(processes) == (mediaserver.MAX_LIVE_ENCODERS if stage in ("stream", "cleanup") else 0)
+                # Saturating live capture must not block other handlers.
+                async with s.get(server.base_url) as r:
+                    assert r.status == 200
+                async with s.get(server.stream_url("aiff")) as r:
+                    assert r.status == 404
+                gate.set()
+                if not responses:
+                    responses = await asyncio.gather(*requests)
+                for proc in processes:
+                    proc.stdout.feed_eof()
+                await asyncio.gather(*(r.read() for r in responses))
+                # Reap completed encoders before admitting another listener.
+                assert all(p.communicate.await_count == 1 for p in processes)
+                async with s.get(server.stream_url()) as r:
+                    assert r.status == 200
+                    processes[-1].stdout.feed_eof()
+                    await r.read()
+        finally:
+            gate.set()
+            for proc in processes:
+                proc.stdout.feed_eof()
+            for response in responses:
+                response.close()
+            for task in requests:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*requests, return_exceptions=True)
+            await server.stop()
+
+    asyncio.run(main())
+
+
+@pytest.mark.parametrize("failure", ["no_monitor", "spawn", "prepare", "read", "cancel", "timeout"])
+def test_live_slot_recovered_after_failure(monkeypatch, failure):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, Mock
+    from aiohttp import web
+    from sonolin import mediaserver
+
+    async def main():
+        server = MediaServer(host="127.0.0.1")
+        proc = Mock(returncode=None, stdout=Mock(read=AsyncMock(return_value=b"")),
+                    communicate=AsyncMock(return_value=(b"", b"")))
+        monitor = AsyncMock(return_value=None if failure == "no_monitor" else "test.monitor")
+        spawn = AsyncMock(return_value=proc)
+        prepare = AsyncMock()
+        monkeypatch.setattr(mediaserver, "default_monitor", monitor)
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+        monkeypatch.setattr(web.StreamResponse, "prepare", prepare)
+        if failure == "spawn":
+            spawn.side_effect = OSError("cannot start encoder")
+        elif failure == "prepare":
+            prepare.side_effect = ConnectionResetError()
+        elif failure == "read":
+            proc.stdout.read.side_effect = ConnectionResetError()
+        elif failure == "cancel":
+            proc.stdout.read.side_effect = asyncio.CancelledError()
+        elif failure == "timeout":
+            proc.communicate.side_effect = [asyncio.TimeoutError()] + [
+                (b"", b"")
+            ] * (mediaserver.MAX_LIVE_ENCODERS + 2)
+
+        request = SimpleNamespace(match_info={"fmt": "flac"})
+        # Repeated failures must not consume the server's capacity permanently.
+        for _ in range(mediaserver.MAX_LIVE_ENCODERS + 1):
+            if failure == "no_monitor":
+                with pytest.raises(web.HTTPServiceUnavailable) as exc:
+                    await server._live(request)
+                assert exc.value.text == "no audio monitor source available"
+            elif failure == "spawn":
+                with pytest.raises(OSError):
+                    await server._live(request)
+            else:
+                await server._live(request)
+        assert monitor.await_count == mediaserver.MAX_LIVE_ENCODERS + 1
+        if failure not in ("no_monitor", "spawn"):
+            assert proc.terminate.call_count == mediaserver.MAX_LIVE_ENCODERS + 1
+            assert proc.communicate.await_count >= mediaserver.MAX_LIVE_ENCODERS + 1
+        if failure == "timeout":
+            assert proc.kill.call_count == 1
+
+    asyncio.run(main())
