@@ -22,6 +22,7 @@ import json
 import logging
 import os
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
@@ -510,21 +511,29 @@ class Services:
     #: What services call the folder holding the user's own music.
     LIBRARY_NAMES = ("your music", "my music", "your library", "my library", "library")
 
+    #: Bound speculative browsing independently of the service's response size.
+    HOME_FOLDER_LIMIT = 4
+    HOME_EXPANSION_SECONDS = 10.0
+
     def home_page(self, name: str, speaker) -> tuple[list, list[tuple[object, list]]]:
         """The service's top level, plus the user's own library opened up.
 
         Services file the user's playlists and albums one or two levels down
         (Spotify: Your Music › Playlists), which hides exactly what people look
         for first, such as Discover Weekly. Returns the top-level items and a
-        list of ``(folder, items)`` for each folder inside the library.
+        list of ``(folder, items)`` for a bounded preview of the library.
+        The time budget stops new calls; an in-flight call uses SoCo's timeout.
         """
+        deadline = time.monotonic() + self.HOME_EXPANSION_SECONDS
         root = self.browse(name, speaker)
         library = next((i for i in root
                         if (getattr(i, "title", "") or "").strip().lower() in self.LIBRARY_NAMES),
                        None)
         sections: list[tuple[object, list]] = []
-        if library is not None:
+        if library is not None and time.monotonic() < deadline:
             for folder in self.browse(name, speaker, library):
+                if len(sections) >= self.HOME_FOLDER_LIMIT or time.monotonic() >= deadline:
+                    break
                 if describe(folder).kind == "folder":
                     sections.append((folder, self.browse(name, speaker, folder, count=60)))
         return root, sections

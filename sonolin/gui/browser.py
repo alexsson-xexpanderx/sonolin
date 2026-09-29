@@ -1315,10 +1315,9 @@ class Browser(QWidget):
                 body, limit = self._cards(items[:14]), 14
             show_all = (lambda f=folder: self.open_entry(f)) if len(items) > limit else None
             lay.addWidget(_section(title, body, show_all))
-        browse = [e for e in root
-                  if e.title.strip().lower() not in Services.LIBRARY_NAMES or not library]
-        if browse:
-            lay.addWidget(_section("Browse" if library else "", self._cards(browse)))
+        # Automatic expansion is only a preview; keep the library reachable.
+        if root:
+            lay.addWidget(_section("Browse" if library else "", self._cards(root)))
 
     def _sectioned(self, lay: QVBoxLayout, entries: list[Entry], loc: Location) -> None:
         for kind, title, category, limit in SEARCH_SECTIONS:
