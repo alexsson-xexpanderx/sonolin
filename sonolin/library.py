@@ -81,7 +81,10 @@ class Library:
                 dirnames[:] = [d for d in dirnames if not d.startswith(".")]
                 for name in filenames:
                     if Path(name).suffix.lower() in AUDIO_SUFFIXES:
-                        yield Path(dirpath) / name
+                        path = Path(dirpath) / name
+                        # os.walk's followlinks=False only excludes directory links.
+                        if not path.is_symlink():
+                            yield path
 
     def scan(self, progress: Callable[[int, Path], None] | None = None) -> int:
         """Rebuild the index. Returns the number of tracks found.

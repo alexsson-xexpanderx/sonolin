@@ -7,6 +7,26 @@ def test_scan_finds_audio_and_skips_other_files(music_dir):
     assert {t.path.name for t in lib.tracks} == {"a.flac", "b.mp3", "c.m4a", "d.ogg"}
 
 
+def test_scan_skips_file_and_directory_symlinks(tmp_path):
+    music = tmp_path / "music"
+    music.mkdir()
+    track = music / "song.mp3"
+    track.write_bytes(b"local track")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    secret = outside / "private.txt"
+    secret.write_bytes(b"private data")
+    (outside / "other.mp3").write_bytes(b"external track")
+    (music / "external.mp3").symlink_to(secret)
+    (music / "internal.mp3").symlink_to(track)
+    (music / "broken.mp3").symlink_to(tmp_path / "missing")
+    (music / "album").symlink_to(outside, target_is_directory=True)
+
+    lib = Library([music])
+    assert lib.scan() == 1
+    assert [t.path for t in lib.tracks] == [track]
+
+
 def test_grouping(music_dir):
     lib = Library([music_dir]); lib.scan()
     albums = lib.albums()
