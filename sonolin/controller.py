@@ -321,10 +321,23 @@ class Controller:
         takes the player over. This is noson-app's headline feature and has no
         equivalent in any other Python Sonos library.
         """
-        server = self._require_server()
-        url = server.stream_url(fmt)
-        speaker.soco.play_uri(url, title="Desktop audio")
-        return url
+        with self._lock:
+            server = self._require_server()
+            url = _Loop.submit(server.start_stream(fmt))
+            try:
+                speaker.soco.play_uri(url, title="Desktop audio")
+            except Exception:
+                _Loop.submit(server.stop_stream())
+                raise
+            return url
+
+    def stop_desktop(self, speaker: Speaker | None = None) -> None:
+        """Revoke capture locally even if the speaker cannot be reached."""
+        with self._lock:
+            if self.server is not None:
+                _Loop.submit(self.server.stop_stream())
+            if speaker is not None:
+                speaker.stop()
 
     def capture_sources(self) -> list[str]:
         return _Loop.submit(list_monitors())

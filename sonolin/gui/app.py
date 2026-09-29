@@ -1046,8 +1046,9 @@ class MainWindow(QMainWindow):
         workers.run(do, on_done=done, on_error=self._error)
 
     def _stream_stop(self) -> None:
-        self.stream.status.setText("Not streaming.")
-        self._call("stop")
+        sp = self.current
+        self._run(lambda: self.c.stop_desktop(sp),
+                  then=lambda: self.stream.status.setText("Not streaming."))
 
     # -- device ------------------------------------------------------------
 

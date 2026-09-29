@@ -23,6 +23,7 @@ import asyncio
 import hashlib
 import logging
 import mimetypes
+import secrets
 import socket
 import time
 from dataclasses import dataclass, field
@@ -113,6 +114,8 @@ class MediaServer:
         self._art_cache: dict[str, tuple[bytes, str]] = {}
         self._tokens: dict[str, Path] = {}
         self._token_source: object = None
+        self._live_token: str | None = None
+        self._live_tasks: set[asyncio.Task] = set()
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -151,6 +154,7 @@ class MediaServer:
         return self.base_url
 
     async def stop(self) -> None:
+        await self.stop_stream()
         if self._runner is not None:
             await self._runner.cleanup()
             self._runner = None
@@ -172,8 +176,27 @@ class MediaServer:
     def art_url(self, path: str | Path) -> str:
         return f"{self.base_url}/art/{token_for(path)}"
 
-    def stream_url(self, fmt: str = "flac") -> str:
-        return f"{self.base_url}/stream/live.{fmt}"
+    async def start_stream(self, fmt: str = "flac") -> str:
+        """Authorize a desktop session until explicitly stopped or replaced.
+
+        Run on the server's loop, like stop_stream. The URL is a bearer
+        capability: only the selected player should be given it.
+        """
+        if fmt not in STREAM_FORMATS:
+            raise ValueError(f"unknown stream format {fmt!r}")
+        base = self.base_url
+        await self.stop_stream()
+        self._live_token = secrets.token_urlsafe(32)
+        return f"{base}/stream/live.{fmt}?token={self._live_token}"
+
+    async def stop_stream(self) -> None:
+        """Revoke the URL and stop every capture, including stalled listeners."""
+        self._live_token = None
+        tasks = list(self._live_tasks)
+        for task in tasks:
+            if not task.cancelling():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     def add_clip(self, data: bytes, content_type: str = "audio/wav", suffix: str = "wav") -> str:
         """Publish a generated clip and return its URL.
@@ -271,6 +294,19 @@ class MediaServer:
         own process rather than sharing a buffer, which keeps a slow consumer
         from stalling a fast one.
         """
+        token = request.query.get("token", "")
+        if self._live_token is None or not secrets.compare_digest(
+            token.encode(), self._live_token.encode()
+        ):
+            raise web.HTTPNotFound()
+        task = asyncio.current_task()
+        self._live_tasks.add(task)
+        try:
+            return await self._capture(request)
+        finally:
+            self._live_tasks.discard(task)
+
+    async def _capture(self, request: web.Request) -> web.StreamResponse:
         fmt = request.match_info["fmt"].lower()
         if fmt not in STREAM_FORMATS:
             raise web.HTTPNotFound(text=f"unknown format {fmt!r}")
@@ -286,17 +322,19 @@ class MediaServer:
             *args, "-",
         ]
         log.info("live capture: %s", " ".join(cmd))
-        proc = await asyncio.create_subprocess_exec(
+        # Shield process creation so revocation during spawn still reaps it.
+        spawning = asyncio.create_task(asyncio.create_subprocess_exec(
             *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-        )
+        ))
         response = web.StreamResponse(headers={
             "Content-Type": ctype,
             "Cache-Control": "no-cache, no-store",
             # A live capture has no length and must never be treated as seekable.
             "Accept-Ranges": "none",
         })
-        await response.prepare(request)
         try:
+            proc = await asyncio.shield(spawning)
+            await response.prepare(request)
             assert proc.stdout is not None
             while True:
                 chunk = await proc.stdout.read(16384)
@@ -306,12 +344,14 @@ class MediaServer:
         except (ConnectionResetError, asyncio.CancelledError):
             log.info("live listener went away")
         finally:
+            proc = await spawning
             if proc.returncode is None:
                 proc.terminate()
                 try:
                     await asyncio.wait_for(proc.wait(), 3)
                 except asyncio.TimeoutError:
                     proc.kill()
+                    await proc.wait()
             if proc.stderr is not None:
                 err = (await proc.stderr.read()).decode("utf-8", "replace").strip()
                 if err:

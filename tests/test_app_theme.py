@@ -131,3 +131,22 @@ def test_there_is_no_toolbar_and_settings_holds_its_actions(app, monkeypatch):
         w.current = None
         w.mpris.unregister()
         style.apply(app, themes.DARK)
+
+
+@pytest.mark.parametrize("speaker", [None, object()])
+def test_stream_stop_revokes_desktop_session(app, speaker):
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    from sonolin.gui.app import MainWindow
+
+    stop = Mock()
+    window = SimpleNamespace(c=SimpleNamespace(stop_desktop=stop), current=speaker,
+                             stream=SimpleNamespace(status=Mock()))
+    def run(fn, *args, then):
+        fn(*args)
+        then()
+    window._run = run
+    MainWindow._stream_stop(window)
+    stop.assert_called_once_with(speaker)
+    window.stream.status.setText.assert_called_once_with("Not streaming.")

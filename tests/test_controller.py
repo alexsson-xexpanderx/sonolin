@@ -64,3 +64,29 @@ def test_local_songs_play_on_down_the_list(xdg, monkeypatch):
     monkeypatch.setattr(c, "enqueue", lambda sp, tracks: calls.append(("enqueue", len(tracks))))
     c.play_local_list(speaker, [Tags(path=Path(f"/m/{n}.flac")) for n in range(5)], start=2)
     assert calls == ["clear", ("enqueue", 5), ("play_from", 2)]
+
+
+def test_desktop_session_lifecycle(controller):
+    from unittest.mock import Mock
+
+    speaker = SimpleNamespace(soco=SimpleNamespace(play_uri=Mock()), stop=Mock())
+    url = controller.stream_desktop(speaker)
+    speaker.soco.play_uri.assert_called_once_with(url, title="Desktop audio")
+    assert "?token=" in url
+    token = controller.server._live_token
+    assert token
+    assert token not in controller.stream_desktop(speaker)
+    # Revocation must happen even when stopping the remote player fails.
+    speaker.stop.side_effect = OSError("speaker offline")
+    with pytest.raises(OSError):
+        controller.stop_desktop(speaker)
+    assert controller.server._live_token is None
+
+
+def test_failed_desktop_play_revokes_session(controller):
+    from unittest.mock import Mock
+
+    speaker = SimpleNamespace(soco=SimpleNamespace(play_uri=Mock(side_effect=OSError)))
+    with pytest.raises(OSError):
+        controller.stream_desktop(speaker)
+    assert controller.server._live_token is None

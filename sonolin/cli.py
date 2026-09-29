@@ -449,7 +449,7 @@ def _run(args, c: Controller, sp: Speaker) -> int:
             c.set_capture_source(args.source)
         url = c.stream_desktop(sp, args.format)
         _serve_until_interrupted(f"{sp.name} is playing this machine's audio from {url}",
-                                 on_stop=sp.stop)
+                                 on_stop=lambda: c.stop_desktop(sp))
     elif cmd == "play-file":
         files = [Path(f) for f in args.files]
         missing = [str(f) for f in files if not f.is_file()]

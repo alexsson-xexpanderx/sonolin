@@ -124,3 +124,126 @@ def test_busy_port_falls_back_to_a_free_one(music_dir):
             await second.stop(); await first.stop()
 
     asyncio.run(main())
+
+
+@pytest.mark.parametrize("fmt", ["flac", "mp3", "wav"])
+def test_live_requires_current_session(tmp_path, monkeypatch, fmt):
+    from unittest.mock import AsyncMock
+
+    monitor = AsyncMock(return_value=None)
+    spawn = AsyncMock()
+    monkeypatch.setattr("sonolin.mediaserver.default_monitor", monitor)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+
+    async def check(server, lib, s):
+        public = f"{server.base_url}/stream/live.{fmt}"
+        async def denied(url):
+            for method in (s.get, s.head):
+                async with method(url) as r:
+                    assert r.status == 404
+
+        await denied(public)
+        url = await server.start_stream(fmt)
+        await denied(public)
+        await denied(public + "?token=wrong")
+        await denied(public + "?token=é")
+        monitor.assert_not_called()
+        spawn.assert_not_called()
+        # Valid authorization reaches monitor discovery (no monitor here).
+        async with s.get(url) as r:
+            assert r.status == 503
+        assert monitor.await_count == 1
+        replacement = await server.start_stream(fmt)
+        assert replacement != url
+        await denied(url)
+        await server.stop_stream()
+        await denied(replacement)
+        assert monitor.await_count == 1
+        spawn.assert_not_called()
+
+    serve(tmp_path, check)
+
+
+@pytest.mark.parametrize("end", ["stop", "replace", "shutdown"])
+def test_revocation_ends_active_capture(tmp_path, monkeypatch, end):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, Mock
+
+    async def check(server, lib, s):
+        stdout, stderr = asyncio.StreamReader(), asyncio.StreamReader()
+        stdout.feed_data(b"desktop audio")
+        stderr.feed_eof()
+        proc = SimpleNamespace(stdout=stdout, stderr=stderr, returncode=None,
+                               terminate=Mock(), kill=Mock(), wait=AsyncMock(return_value=0))
+        spawn = AsyncMock(return_value=proc)
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+        server.capture_source = "test.monitor"
+        url = await server.start_stream()
+        async with s.get(url) as r:
+            assert r.status == 200
+            assert await r.content.readexactly(13) == b"desktop audio"
+            if end == "shutdown":
+                await asyncio.wait_for(server.stop(), 2)
+                await server.start()
+            elif end == "replace":
+                await asyncio.wait_for(server.start_stream(), 2)
+            else:
+                await asyncio.wait_for(server.stop_stream(), 2)
+            assert await asyncio.wait_for(r.read(), 2) == b""
+        proc.terminate.assert_called_once()
+        proc.wait.assert_awaited_once()
+        assert not server._live_tasks
+        # Test the stale capability against the current port after a restart.
+        async with s.get(server.base_url + "/" + url.split("/", 3)[3]) as r:
+            assert r.status == 404
+        spawn.assert_awaited_once()
+
+    serve(tmp_path, check)
+
+
+@pytest.mark.parametrize("phase", ["monitor", "spawn", "prepare"])
+def test_revocation_cleans_up_capture_startup(tmp_path, monkeypatch, phase):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, Mock
+    from aiohttp.test_utils import make_mocked_request
+
+    async def check(server, lib, s):
+        reached, release = asyncio.Event(), asyncio.Event()
+        stderr = asyncio.StreamReader()
+        stderr.feed_eof()
+        proc = SimpleNamespace(stderr=stderr, returncode=None,
+                               terminate=Mock(), kill=Mock(), wait=AsyncMock(return_value=0))
+
+        async def pause(result):
+            reached.set()
+            await release.wait()
+            return result
+
+        async def source():
+            return await pause("test.monitor") if phase == "monitor" else "test.monitor"
+        async def spawn(*args, **kwargs):
+            return await pause(proc) if phase == "spawn" else proc
+        async def prepare(*args):
+            return await pause(None)
+        monkeypatch.setattr("sonolin.mediaserver.default_monitor", source)
+        spawn_mock = AsyncMock(side_effect=spawn)
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn_mock)
+        monkeypatch.setattr("aiohttp.web.StreamResponse.prepare", prepare)
+        url = await server.start_stream()
+        request = make_mocked_request("GET", "/" + url.split("/", 3)[3],
+                                      match_info={"fmt": "flac"})
+        listener = asyncio.create_task(server._live(request))
+        await asyncio.wait_for(reached.wait(), 2)
+        stopping = asyncio.create_task(server.stop_stream())
+        await asyncio.sleep(0)  # let revocation cancel the listener
+        release.set()
+        await asyncio.wait_for(stopping, 2)
+        assert listener.done()
+        if phase == "monitor":
+            spawn_mock.assert_not_called()
+        else:
+            proc.terminate.assert_called_once()
+            proc.wait.assert_awaited_once()
+        assert not server._live_tasks
+
+    serve(tmp_path, check)
