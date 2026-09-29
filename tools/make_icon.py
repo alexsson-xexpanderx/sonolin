@@ -15,6 +15,8 @@ with QtSvg, which ignores filters anyway).
 from __future__ import annotations
 
 import math
+import os
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -50,7 +52,15 @@ def icon() -> str:
 def main() -> None:
     svg = icon()
     for target in TARGETS:
-        target.write_text(svg, encoding="utf-8")
+        # Replace the directory entry so a contributed symlink cannot redirect the write.
+        fd, tmp = tempfile.mkstemp(dir=target.parent, prefix=".sonolin-", suffix=".svg")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(svg)
+            os.chmod(tmp, 0o644)
+            os.replace(tmp, target)
+        finally:
+            Path(tmp).unlink(missing_ok=True)
         print(f"wrote {target.relative_to(ROOT)}")
 
 
