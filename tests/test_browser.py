@@ -1,6 +1,8 @@
 """Browser logic that does not need a speaker or a network."""
 
+from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import unquote, urlsplit
 
 import pytest
 
@@ -171,9 +173,18 @@ SPEAKER_ART = "http://speaker.invalid:1400/getaa?s=1&u=song{}"
 def _loader(monkeypatch):
     """A loader that records what it would ask a speaker for, without asking."""
     loader = ArtLoader()
-    sent, real_send = [], loader._send
-    monkeypatch.setattr(loader, "_send", lambda url: sent.append(url) if url.startswith(
-        "http") else real_send(url))
+    from PyQt6.QtCore import QTimer
+
+    sent = []
+    def send(url):
+        if url.startswith("http"):
+            sent.append(url)
+        else:
+            # Existing scheduling tests use local fixtures, never real requests.
+            path = Path(unquote(urlsplit(url).path))
+            data = path.read_bytes() if path.exists() else b""
+            QTimer.singleShot(0, lambda: loader._finish(url, data))
+    monkeypatch.setattr(loader, "_send", send)
     loader._speaker_lane.start = loader._send
     landed = []
     loader.ready.connect(landed.append)
@@ -266,3 +277,237 @@ def test_a_damaged_address_file_is_ignored(app, monkeypatch):
     loader, sent, landed = _loader(monkeypatch)
     loader._sources_file.write_text("{not json")
     assert ArtLoader()._load_sources() == {}
+
+
+# -- artwork destination policy --------------------------------------------------
+
+import json  # noqa: E402
+import socket  # noqa: E402
+
+from PyQt6.QtCore import QObject, QTimer, QUrl, pyqtSignal  # noqa: E402
+from PyQt6.QtNetwork import QNetworkReply, QNetworkRequest  # noqa: E402
+
+from sonolin.gui.browser import _public_art_address  # noqa: E402
+
+
+def _dns(monkeypatch, *addresses):
+    calls = []
+    def resolve(host, port, **kwargs):
+        calls.append((host, port))
+        return [(socket.AF_INET6 if ":" in ip else socket.AF_INET,
+                 socket.SOCK_STREAM, 6, "", (ip, port)) for ip in addresses]
+    monkeypatch.setattr(socket, "getaddrinfo", resolve)
+    return calls
+
+
+@pytest.mark.parametrize("address", [
+    "127.0.0.1", "10.0.0.1", "172.16.0.1", "192.168.1.1", "169.254.169.254",
+    "0.0.0.0", "100.64.0.1", "224.0.0.1", "255.255.255.255", "::1", "::",
+    "fd00::1", "fe80::1", "ff02::1", "::ffff:127.0.0.1", "64:ff9b::7f00:1",
+    "2002:7f00:1::", "2001:db8::1",
+])
+def test_art_dns_rejects_non_public_addresses(monkeypatch, address):
+    _dns(monkeypatch, address)
+    with pytest.raises(ValueError):
+        _public_art_address("art.invalid", 443)
+
+
+@pytest.mark.parametrize("addresses", [(), ("8.8.8.8", "127.0.0.1")])
+def test_art_dns_rejects_empty_or_mixed_answers(monkeypatch, addresses):
+    _dns(monkeypatch, *addresses)
+    with pytest.raises(ValueError):
+        _public_art_address("art.invalid", 443)
+
+
+@pytest.mark.parametrize("address", ["8.8.8.8", "2606:4700:4700::1111"])
+def test_art_dns_accepts_public_unicast(monkeypatch, address):
+    _dns(monkeypatch, address)
+    assert _public_art_address("art.invalid", 443) == address
+
+
+class _ArtReply(QObject):
+    finished = pyqtSignal()
+
+    def __init__(self, data=b"", redirect=None):
+        super().__init__()
+        self.data, self.redirect = data, redirect
+
+    def error(self):
+        return QNetworkReply.NetworkError.NoError
+
+    def readAll(self):
+        return self.data
+
+    def attribute(self, attr):
+        if attr == QNetworkRequest.Attribute.RedirectionTargetAttribute:
+            return QUrl(self.redirect) if self.redirect is not None else None
+
+
+def _network(monkeypatch, loader, *responses):
+    requests, replies = [], []
+    responses = iter(responses)
+    def get(req):
+        requests.append(req)
+        reply = _ArtReply(**next(responses, {}))
+        replies.append(reply)
+        QTimer.singleShot(0, reply.finished.emit)
+        return reply
+    monkeypatch.setattr(loader.nam, "get", get)
+    return requests
+
+
+@pytest.mark.parametrize("url", [
+    "file:///etc/passwd", "ftp://art.invalid/a", "data:image/png;base64,aGVsbG8=",
+    "/relative.png", "http:///missing-host", "http://user:pass@art.invalid/a",
+    "http://art.invalid:0/a", "http://[fe80::1%25eth0]/a",
+    "http://127.1/a", "http://2130706433/a", "http://0x7f000001/a",
+    "http://[::ffff:127.0.0.1]/a", "http://169.254.169.254/a",
+])
+def test_art_rejects_unsafe_urls_before_network(app, monkeypatch, url):
+    loader = ArtLoader()
+    _dns(monkeypatch, "127.0.0.1")
+    requests = _network(monkeypatch, loader)
+    loader.pixmap(url, 40)
+    assert _wait(app, lambda: url in loader._failed)
+    assert not requests and not loader._pending
+
+
+def test_art_pins_dns_and_preserves_origin(app, monkeypatch, tmp_path):
+    loader = ArtLoader()
+    calls = _dns(monkeypatch, "8.8.8.8")
+    _png(tmp_path / "cover.png")
+    requests = _network(monkeypatch, loader, data_response := {
+        "data": (tmp_path / "cover.png").read_bytes()})
+    url = "https://art.invalid:8443/cover.png"
+    loader.pixmap(url, 40)
+    assert _wait(app, lambda: url in loader._images)
+    assert calls == [("art.invalid", 8443)]
+    req, = requests
+    assert req.url().host() == "8.8.8.8", "Qt cannot re-resolve the service hostname"
+    assert req.rawHeader(b"Host") == b"art.invalid:8443"
+    assert req.peerVerifyName() == "art.invalid"
+    assert req.attribute(QNetworkRequest.Attribute.Http2AllowedAttribute) is False
+    assert req.attribute(QNetworkRequest.Attribute.RedirectPolicyAttribute) == \
+        QNetworkRequest.RedirectPolicy.ManualRedirectPolicy
+    assert loader.nam.proxy().type().name == "NoProxy"
+    # Persistent cache uses the origin, not the shared CDN IP.
+    again = ArtLoader()
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *a, **kw: (_ for _ in ()).throw(OSError("cache miss")))
+    requests = _network(monkeypatch, again, data_response)
+    again.pixmap(url, 40)
+    assert _wait(app, lambda: not again._pending)
+    assert url in again._images and not requests
+
+
+@pytest.mark.parametrize("redirect", [
+    "http://127.0.0.1/admin", "//169.254.169.254/latest/meta-data/", "file:///etc/passwd",
+])
+def test_art_redirects_cannot_reach_internal_targets(app, monkeypatch, redirect):
+    loader = ArtLoader()
+    _dns(monkeypatch, "127.0.0.1")
+    # The first destination is a trusted local cover endpoint; redirects aren't trusted.
+    url = "http://192.168.1.2:1400/getaa?s=1"
+    loader.local_artwork = lambda target: target == QUrl(url)
+    requests = _network(monkeypatch, loader, {"redirect": redirect})
+    loader.pixmap(url, 40)
+    assert _wait(app, lambda: url in loader._failed)
+    assert len(requests) == 1 and not loader._pending
+    assert not loader._speaker_lane.running
+
+
+def test_art_follows_relative_redirects_against_original_host(app, monkeypatch, tmp_path):
+    loader = ArtLoader()
+    calls = _dns(monkeypatch, "8.8.8.8")
+    _png(tmp_path / "cover.png")
+    requests = _network(monkeypatch, loader, {"redirect": "../final.png"},
+                        {"data": (tmp_path / "cover.png").read_bytes()})
+    url = "https://art.invalid/folder/start"
+    loader.pixmap(url, 40)
+    assert _wait(app, lambda: url in loader._images)
+    assert calls == [("art.invalid", 443)] * 2
+    assert len(requests) == 2 and requests[1].url().path() == "/final.png"
+    assert requests[1].rawHeader(b"Host") == b"art.invalid"
+
+
+def test_art_redirects_recheck_dns_and_limit_loops(app, monkeypatch):
+    loader = ArtLoader()
+    _dns(monkeypatch, "8.8.8.8")
+    requests = _network(monkeypatch, loader, *[{"redirect": "/loop"}] * 6)
+    url = "https://art.invalid/loop"
+    loader.pixmap(url, 40)
+    assert _wait(app, lambda: url in loader._failed)
+    assert len(requests) == 6 and not loader._pending
+
+
+def test_art_revalidates_saved_and_resolved_sources(app, monkeypatch):
+    for saved in (False, True):
+        loader = ArtLoader()
+        url, bad = f"https://art.invalid/{saved}", "http://127.0.0.1/private"
+        if saved:
+            loader._sources_file.write_text(json.dumps({url: bad}))
+            loader = ArtLoader()
+        else:
+            loader.resolver = lambda _url: lambda: bad
+        _dns(monkeypatch, "127.0.0.1")
+        requests = _network(monkeypatch, loader)
+        loader.pixmap(url, 40)
+        assert _wait(app, lambda: url in loader._failed)
+        assert bad in loader._failed and not requests and not loader._pending
+
+
+def test_art_rebinding_on_redirect_is_rejected(app, monkeypatch):
+    loader = ArtLoader()
+    calls = []
+    def resolve(host, port, **kwargs):
+        calls.append(host)
+        ip = "8.8.8.8" if len(calls) == 1 else "127.0.0.1"
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, port))]
+    monkeypatch.setattr(socket, "getaddrinfo", resolve)
+    requests = _network(monkeypatch, loader, {"redirect": "/new"})
+    url = "https://art.invalid/start"
+    loader.pixmap(url, 40)
+    assert _wait(app, lambda: url in loader._failed)
+    assert len(calls) == 2 and len(requests) == 1
+
+
+@pytest.mark.parametrize("destination", ["/cover", "/private"])
+def test_art_real_http_redirect_policy(app, tmp_path, destination):
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from threading import Thread
+
+    _png(tmp_path / "cover.png")
+    data = (tmp_path / "cover.png").read_bytes()
+    received = []
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            received.append(self.path)
+            self.send_response(302 if self.path == "/start" else 200)
+            if self.path == "/start":
+                self.send_header("Location", destination)
+            self.end_headers()
+            if self.path != "/start":
+                self.wfile.write(data)
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        loader = ArtLoader()
+        port = server.server_port
+        loader.local_artwork = lambda target: (
+            target.host() == "127.0.0.1" and target.port() == port
+            and target.path() in ("/start", "/cover"))
+        url = f"http://127.0.0.1:{port}/start"
+        loader.pixmap(url, 40)
+        assert _wait(app, lambda: not loader._pending)
+        if destination == "/cover":
+            assert url in loader._images and received == ["/start", "/cover"]
+        else:
+            assert url in loader._failed and received == ["/start"]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
