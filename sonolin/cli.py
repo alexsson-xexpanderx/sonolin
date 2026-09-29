@@ -45,6 +45,12 @@ SOUND_KEYS = {
 }
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        # A speaker's diagnostic response must not send us to another endpoint.
+        return None
+
+
 def _bool(text: str) -> bool:
     if text.lower() in ("1", "on", "yes", "true", "enable", "enabled"):
         return True
@@ -514,7 +520,8 @@ def _run(args, c: Controller, sp: Speaker) -> int:
         sp.soco.player_name = args.name
     elif cmd == "diag":
         page = f"/status/{args.page}" if args.page else "/status"
-        with urllib.request.urlopen(f"http://{sp.ip}:1400{page}", timeout=8) as r:
+        opener = urllib.request.build_opener(_NoRedirect())
+        with opener.open(f"http://{sp.ip}:1400{page}", timeout=8) as r:
             body = r.read().decode("utf-8", "replace")
         if not args.page:
             # The firmware writes its links unquoted: <a href=/status/zp>.

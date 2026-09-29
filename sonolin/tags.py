@@ -14,6 +14,8 @@ import struct
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .localfiles import open_regular
+
 AUDIO_SUFFIXES = {".flac", ".mp3", ".m4a", ".mp4", ".ogg", ".oga", ".opus"}
 
 
@@ -217,6 +219,9 @@ def _read_ogg(fh, tags: Tags) -> None:
 
 # -- ID3 / MP3 -------------------------------------------------------------
 
+# Leave room for embedded artwork without allowing a header to allocate 256 MiB.
+_MAX_ID3_SIZE = 16 * 1024 * 1024
+
 _ID3_MAP = {
     "TIT2": "title", "TT2": "title",
     "TPE1": "artist", "TP1": "artist",
@@ -252,6 +257,8 @@ def _read_id3(fh, tags: Tags) -> int:
     # Syncsafe: seven bits per byte.
     size = ((size >> 24) & 0x7F) << 21 | ((size >> 16) & 0x7F) << 14 \
         | ((size >> 8) & 0x7F) << 7 | (size & 0x7F)
+    if size > _MAX_ID3_SIZE:
+        return size + 10
     blob = fh.read(size)
     if flags & 0x40:  # extended header, skip it
         try:
@@ -466,8 +473,8 @@ def read(path: str | os.PathLike, *, want_picture: bool = False) -> Tags:
     tags = Tags(path=p)
     suffix = p.suffix.lower()
     try:
-        size = p.stat().st_size
-        with p.open("rb") as fh:
+        with open_regular(p) as fh:
+            size = os.fstat(fh.fileno()).st_size
             if suffix == ".flac":
                 _read_flac(fh, tags)
             elif suffix in (".ogg", ".oga", ".opus"):
@@ -493,9 +500,9 @@ def read_picture(path: str | os.PathLike) -> Picture | None:
     for name in ("cover", "folder", "front", "album", "albumart"):
         for ext, mime in ((".jpg", "image/jpeg"), (".jpeg", "image/jpeg"), (".png", "image/png")):
             candidate = folder / f"{name}{ext}"
-            if candidate.is_file():
-                try:
-                    return Picture(mime, candidate.read_bytes())
-                except OSError:
-                    continue
+            try:
+                with open_regular(candidate) as fh:
+                    return Picture(mime, fh.read())
+            except OSError:
+                continue
     return None

@@ -20,7 +20,6 @@ import logging
 import re
 import sys
 import time
-import urllib.request
 from pathlib import Path
 
 from PyQt6.QtCore import QRectF, QSize, Qt, QTimer, QUrl, pyqtSignal
@@ -33,6 +32,7 @@ from PyQt6.QtWidgets import (
 )
 
 from ..controller import Controller
+from ..artwork import fetch_art
 from ..speaker import Speaker
 from ..tags import Tags
 from . import style, themes, workers
@@ -751,7 +751,9 @@ class MainWindow(QMainWindow):
         art = info.get("album_art") or ""
         if art and art != self._art_key:
             self._art_key = art
-            workers.run(self._fetch_art, art, on_done=self.now.set_art,
+            server = self.c.server
+            media_url = server.base_url if server and server.port is not None else ""
+            workers.run(self._fetch_art, art, sp.ip, media_url, on_done=self.now.set_art,
                         on_error=lambda _e: None)
         elif not art:
             self._art_key = None
@@ -759,10 +761,9 @@ class MainWindow(QMainWindow):
         self._refresh_item()
 
     @staticmethod
-    def _fetch_art(url: str) -> bytes | None:
+    def _fetch_art(url: str, speaker_ip: str, media_url: str = "") -> bytes | None:
         try:
-            with urllib.request.urlopen(url, timeout=8) as r:
-                return r.read(4_000_000)
+            return fetch_art(url, speaker_ip, media_url)
         except Exception:
             return None
 

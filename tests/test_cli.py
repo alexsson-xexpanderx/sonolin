@@ -1,6 +1,69 @@
+from email.message import Message
+from io import BytesIO
+from types import SimpleNamespace
+from urllib.error import HTTPError
+from urllib.response import addinfourl
+
 import pytest
 
 from sonolin import cli
+
+
+@pytest.fixture
+def diagnostic_response(monkeypatch):
+    """Fake only the transport, keeping urllib's real redirect/error handling."""
+    def respond(code=200, body=b"", location=None):
+        requests = []
+
+        class HTTPHandler(cli.urllib.request.HTTPHandler):
+            def http_open(self, req):
+                requests.append((req.full_url, req.get_method(), req.timeout))
+                headers = Message()
+                if location:
+                    headers["Location"] = location
+                response = addinfourl(BytesIO(body), headers, req.full_url,
+                                      code if len(requests) == 1 else 200)
+                response.msg = "test response"
+                return response
+
+        monkeypatch.setattr(cli.urllib.request, "HTTPHandler", HTTPHandler)
+        monkeypatch.setattr(cli.urllib.request, "_opener", None)
+        monkeypatch.setattr(cli.urllib.request, "getproxies", lambda: {})
+        return requests
+
+    return respond
+
+
+@pytest.mark.parametrize("code", [301, 302, 303, 307, 308])
+@pytest.mark.parametrize("location", [
+    "http://127.0.0.1:8080/private",
+    "http://192.0.2.1:8080/private",
+    "//192.0.2.2/private",
+    "/status/zp",
+])
+def test_diag_rejects_redirects(diagnostic_response, code, location):
+    requests = diagnostic_response(code=code, location=location)
+    args = cli.build_parser().parse_args(["diag"])
+    with pytest.raises(HTTPError) as exc:
+        cli._run(args, None, SimpleNamespace(ip="192.0.2.1"))
+    assert exc.value.code == code
+    exc.value.close()
+    assert requests == [("http://192.0.2.1:1400/status", "GET", 8)]
+
+
+@pytest.mark.parametrize("page,body,expected", [
+    ("", b'<a href=/status/zp>ZP</a><a href="/status/batterystatus">Battery</a>',
+     "zp\nbatterystatus\n"),
+    ("zp", b'<?xml version="1.0"?><?xml-stylesheet href="style"?><ZP>\xff</ZP>',
+     "<ZP>\ufffd</ZP>\n"),
+])
+def test_diag_output(diagnostic_response, capsys, page, body, expected):
+    requests = diagnostic_response(body=body)
+    args = cli.build_parser().parse_args(["diag", page])
+    assert cli._run(args, None, SimpleNamespace(ip="192.0.2.1")) == 0
+    path = f"/status/{page}" if page else "/status"
+    assert requests == [(f"http://192.0.2.1:1400{path}", "GET", 8)]
+    assert capsys.readouterr().out == expected
 
 
 def test_every_subcommand_parses():
