@@ -203,3 +203,20 @@ def test_the_scroll_bar_starts_below_the_headings(app):
     assert bar.isVisible()
     top = bar.mapTo(q.table, QPoint(0, 0)).y()
     assert top >= q.table.horizontalHeader().height(), "the bar must not run up beside the headings"
+
+
+def test_a_click_on_the_bar_goes_straight_there(app):
+    from PyQt6.QtCore import QPoint, Qt
+    from PyQt6.QtTest import QTest
+
+    from sonolin.gui.panels import JumpSlider
+
+    s = JumpSlider(Qt.Orientation.Horizontal)
+    s.setRange(0, 100); s.resize(220, 24); s.show()
+    try:
+        QTest.mouseClick(s, Qt.MouseButton.LeftButton, pos=QPoint(165, 12))
+        assert 65 <= s.value() <= 85, "not one page step (10) towards the click"
+        QTest.mouseClick(s, Qt.MouseButton.LeftButton, pos=QPoint(3, 12))
+        assert s.value() == 0
+    finally:
+        s.close()

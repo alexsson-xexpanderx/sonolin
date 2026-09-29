@@ -199,3 +199,37 @@ def test_desktop_stop_revokes_access_without_a_reachable_speaker(app, monkeypatc
         w.current = None
         w.mpris.unregister()
         c.close()
+
+
+def test_volume_follows_the_wheel_and_clicks_not_only_drags(app, monkeypatch):
+    from types import SimpleNamespace
+
+    from PyQt6.QtCore import QPoint, Qt
+    from PyQt6.QtTest import QTest
+
+    from sonolin.controller import Controller
+    from sonolin.gui import app as app_module
+    from sonolin.gui.app import MainWindow
+
+    sent = []
+    monkeypatch.setattr(app_module.workers, "run",
+                        lambda fn, *args, **kw: sent.append(args) if fn is setattr else None)
+    c = Controller([])
+    w = MainWindow(c)
+    w.timer.stop()
+    try:
+        w.current = SimpleNamespace(name="Kitchen")
+        w.volume.setValue(20)
+        for _ in range(8):  # a wheel spin: one send, of the last value
+            w.volume.triggerAction(w.volume.SliderAction.SliderSingleStepAdd)
+        QTest.qWait(w._volume_send.interval() + 100)
+        assert sent == [(w.current, "volume", 28)]
+
+        w.volume.resize(200, 24)
+        w.volume.show()
+        QTest.mouseClick(w.volume, Qt.MouseButton.LeftButton, pos=QPoint(190, 12))
+        QTest.qWait(w._volume_send.interval() + 100)
+        assert len(sent) == 2 and sent[-1][2] > 80
+
+    finally:
+        w.mpris.unregister()

@@ -19,8 +19,8 @@ from PyQt6.QtGui import (
 from PyQt6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
     QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget,
-    QListWidgetItem, QPushButton, QSlider, QSpinBox, QSplitter, QTableWidget,
-    QTableWidgetItem, QTextEdit, QTimeEdit, QVBoxLayout, QWidget,
+    QListWidgetItem, QPushButton, QSlider, QSpinBox, QSplitter, QStyle, QStyleOptionSlider,
+    QTableWidget, QTableWidgetItem, QTextEdit, QTimeEdit, QVBoxLayout, QWidget,
 )
 
 from ..alarms import DAY_NAMES, RECURRENCES, describe_recurrence
@@ -83,6 +83,33 @@ class _MatchHeight(QObject):
         return False
 
 
+class JumpSlider(QSlider):
+    """A slider that goes straight to where it is clicked.
+
+    A plain QSlider moves one page towards the click, which on a volume or seek
+    bar looks like the click did nothing. After the jump the handle is under the
+    pointer, so the same press carries on as a drag.
+    """
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            opt = QStyleOptionSlider()
+            self.initStyleOption(opt)
+            cc, style_ = QStyle.ComplexControl.CC_Slider, self.style()
+            handle = style_.subControlRect(cc, opt, QStyle.SubControl.SC_SliderHandle, self)
+            where = event.position().toPoint()
+            if not handle.contains(where):
+                groove = style_.subControlRect(cc, opt, QStyle.SubControl.SC_SliderGroove, self)
+                horizontal = self.orientation() == Qt.Orientation.Horizontal
+                length = handle.width() if horizontal else handle.height()
+                start = groove.x() if horizontal else groove.y()
+                span = (groove.width() if horizontal else groove.height()) - length
+                offset = (where.x() if horizontal else where.y()) - start - length // 2
+                self.setValue(QStyle.sliderValueFromPosition(
+                    self.minimum(), self.maximum(), offset, span, opt.upsideDown))
+        super().mousePressEvent(event)
+
+
 class NowPlaying(QWidget):
     """Cover art, track text and position for the selected speaker."""
 
@@ -114,7 +141,7 @@ class NowPlaying(QWidget):
         self.album = QLabel("")
         self.album.setObjectName("trackAlbum")
 
-        self.position = QSlider(Qt.Orientation.Horizontal)
+        self.position = JumpSlider(Qt.Orientation.Horizontal)
         self.position.setRange(0, 1000)
         self.position.sliderPressed.connect(lambda: setattr(self, "_dragging", True))
         self.position.sliderReleased.connect(self._released)

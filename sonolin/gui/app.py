@@ -27,7 +27,7 @@ from PyQt6.QtGui import QAction, QColor, QFont, QIcon, QKeySequence, QPainter, Q
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QFrame, QHBoxLayout, QInputDialog, QLabel, QListWidget,
     QListWidgetItem, QMainWindow, QMenu, QMessageBox, QProgressBar, QPushButton,
-    QSlider, QSplitter, QStackedWidget, QStatusBar, QStyle,
+    QSplitter, QStackedWidget, QStatusBar, QStyle,
     QStyledItemDelegate, QToolButton, QVBoxLayout, QWidget,
 )
 
@@ -43,7 +43,7 @@ from .browser import Browser
 from .nav import NavList
 from .nav import icon as nav_icon
 from .panels import (
-    AlarmsTab, AnnouncePanel, DevicePanel, FavouritesTab, LibraryTab, LinkDialog,
+    AlarmsTab, AnnouncePanel, DevicePanel, FavouritesTab, JumpSlider, LibraryTab, LinkDialog,
     NowPlaying, QueueTab, SoundPanel, StreamPanel,
 )
 
@@ -60,6 +60,10 @@ PAGES = [
 TICK_MS = 1000
 #: A full poll every this many ticks; the position is interpolated in between.
 POLL_EVERY = 5
+#: Milliseconds between volume changes sent while the slider moves.
+VOLUME_EVERY = 150
+#: Seconds a polled volume is ignored after the user moves the slider.
+VOLUME_SETTLE = 2.0
 #: How long to leave a sleeping speaker before checking on it again.
 ASLEEP_RETRY_S = 10
 
@@ -249,11 +253,16 @@ class MainWindow(QMainWindow):
         tl.addSpacing(24)
         self.mute = QCheckBox("Mute")
         self.mute.toggled.connect(self._mute_changed)
-        self.volume = QSlider(Qt.Orientation.Horizontal)
+        self.volume = JumpSlider(Qt.Orientation.Horizontal)
         self.volume.setRange(0, 100); self.volume.setMinimumWidth(180)
         self.volume.setMaximumWidth(280)
-        self.volume.sliderReleased.connect(self._volume_changed)
-        self.volume.valueChanged.connect(lambda v: self.vol_label.setText(str(v)))
+        # Wheel, click, keys and drag all land here. A wheel spin is dozens of
+        # steps, so the speaker is told at most every VOLUME_EVERY ms, always
+        # ending on the last value.
+        self._volume_send = QTimer(self, singleShot=True, interval=VOLUME_EVERY)
+        self._volume_send.timeout.connect(self._volume_changed)
+        self._volume_touched = 0.0
+        self.volume.valueChanged.connect(self._volume_moved)
         self.vol_label = QLabel("—"); self.vol_label.setObjectName("timeLabel")
         self.group_vol = QCheckBox("Whole group")
         self.group_vol.setToolTip("Move every speaker in the group together, keeping their balance")
@@ -651,8 +660,7 @@ class MainWindow(QMainWindow):
 
     def _mpris_volume(self, fraction: float) -> None:
         value = round(fraction * 100)
-        self.volume.setValue(value)
-        self._volume_changed()
+        self.volume.setValue(value)  # sends it, like any other change
 
     def _tick(self) -> None:
         self._ticks += 1
@@ -728,7 +736,10 @@ class MainWindow(QMainWindow):
         source = "desktop" if "/stream/live." in (info.get("uri") or "") else ""
         self.now.set_track(info, state, source)
         self.play_btn.setText("⏸" if state in ("PLAYING", "TRANSITIONING") else "▶")
-        if not self.volume.isSliderDown():
+        # A poll that set off before the user moved the slider brings the old
+        # volume back; leave the slider alone until the speaker has caught up.
+        if not self.volume.isSliderDown() and \
+                time.monotonic() - self._volume_touched > VOLUME_SETTLE:
             self.volume.blockSignals(True)
             self.volume.setValue(int(data["volume"]))
             self.volume.blockSignals(False)
@@ -816,6 +827,12 @@ class MainWindow(QMainWindow):
         # UPnP REL_TIME wants H:MM:SS even for short tracks.
         total = int(seconds)
         self._call("seek", f"{total // 3600}:{total % 3600 // 60:02d}:{total % 60:02d}")
+
+    def _volume_moved(self, value: int) -> None:
+        self.vol_label.setText(str(value))
+        self._volume_touched = time.monotonic()
+        if not self._volume_send.isActive():
+            self._volume_send.start()
 
     def _volume_changed(self) -> None:
         sp = self.current
