@@ -14,6 +14,8 @@ import struct
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .localfiles import open_regular
+
 AUDIO_SUFFIXES = {".flac", ".mp3", ".m4a", ".mp4", ".ogg", ".oga", ".opus"}
 
 
@@ -471,8 +473,8 @@ def read(path: str | os.PathLike, *, want_picture: bool = False) -> Tags:
     tags = Tags(path=p)
     suffix = p.suffix.lower()
     try:
-        size = p.stat().st_size
-        with p.open("rb") as fh:
+        with open_regular(p) as fh:
+            size = os.fstat(fh.fileno()).st_size
             if suffix == ".flac":
                 _read_flac(fh, tags)
             elif suffix in (".ogg", ".oga", ".opus"):
@@ -498,9 +500,9 @@ def read_picture(path: str | os.PathLike) -> Picture | None:
     for name in ("cover", "folder", "front", "album", "albumart"):
         for ext, mime in ((".jpg", "image/jpeg"), (".jpeg", "image/jpeg"), (".png", "image/png")):
             candidate = folder / f"{name}{ext}"
-            if candidate.is_file():
-                try:
-                    return Picture(mime, candidate.read_bytes())
-                except OSError:
-                    continue
+            try:
+                with open_regular(candidate) as fh:
+                    return Picture(mime, fh.read())
+            except OSError:
+                continue
     return None

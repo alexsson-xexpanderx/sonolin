@@ -27,6 +27,18 @@ def test_scan_skips_file_and_directory_symlinks(tmp_path):
     assert [t.path for t in lib.tracks] == [track]
 
 
+def test_explicit_symlink_root_is_canonicalized(tmp_path):
+    music = tmp_path / "music"
+    music.mkdir()
+    track = music / "song.mp3"
+    track.write_bytes(b"local track")
+    root = tmp_path / "selected"
+    root.symlink_to(music, target_is_directory=True)
+    lib = Library([root])
+    assert lib.scan() == 1
+    assert lib.tracks[0].path == track
+
+
 def test_grouping(music_dir):
     lib = Library([music_dir]); lib.scan()
     albums = lib.albums()
