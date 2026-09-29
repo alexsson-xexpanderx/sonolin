@@ -16,14 +16,17 @@ target id; responses echo the command name in ``header["response"]`` and carry
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import itertools
 import json
 import logging
-import ssl
 from collections.abc import Awaitable, Callable
 from typing import Any
+from urllib.parse import urlsplit
 
 import aiohttp
+
+from .config import Config
 
 log = logging.getLogger(__name__)
 
@@ -64,9 +67,9 @@ class SonosWebSocketError(RuntimeError):
 class SonosWebSocket:
     """One long-lived websocket to one player.
 
-    Players present a self-signed certificate for a name that does not resolve,
-    so the certificate is not verified. The connection is still encrypted; it is
-    LAN-local and carries no credentials beyond the public API key above.
+    Players use self-signed certificates. An explicitly trusted SHA-256
+    certificate fingerprint in Config.websocket_fingerprints authenticates
+    each speaker before any commands (including clip URLs) are sent.
     """
 
     def __init__(
@@ -88,18 +91,43 @@ class SonosWebSocket:
     async def connect(self) -> None:
         if self._ws is not None and not self._ws.closed:
             return
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
+        if urlsplit(self.url).scheme != "wss":
+            raise ConnectionError("Speaker connections require wss:// (TLS)")
+        pins = Config.load().websocket_fingerprints
+        pin = pins.get(self.ip) if isinstance(pins, dict) else None
+        try:
+            fingerprint = aiohttp.Fingerprint(bytes.fromhex(pin.replace(":", "")))
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ConnectionError(
+                f"Set a verified SHA-256 certificate fingerprint for {self.ip} in "
+                "config.json's websocket_fingerprints before using announcements "
+                "or other WebSocket controls. See README.md."
+            ) from exc
         if self._session is None:
             self._session = aiohttp.ClientSession()
-        self._ws = await self._session.ws_connect(
-            self.url,
-            headers={"X-Sonos-Api-Key": API_KEY},
-            protocols=(SUBPROTOCOL,),
-            ssl=ctx,
-            heartbeat=30,
-        )
+        ws = None
+        try:
+            ws = await self._session.ws_connect(
+                self.url,
+                headers={"X-Sonos-Api-Key": API_KEY},
+                protocols=(SUBPROTOCOL,),
+                ssl=fingerprint,
+                heartbeat=30,
+            )
+            # Check the final transport too: redirects can downgrade to plaintext,
+            # for which aiohttp's fingerprint check is a no-op.
+            peer = ws.get_extra_info("ssl_object")
+            if peer is None or hashlib.sha256(peer.getpeercert(binary_form=True)).digest() \
+                    != fingerprint.fingerprint:
+                raise ConnectionError(f"Speaker certificate verification failed for {self.ip}")
+        except BaseException:
+            if ws is not None:
+                await ws.close()
+            if self._owns_session:
+                await self._session.close()
+                self._session = None
+            raise
+        self._ws = ws
         self._pump = asyncio.create_task(self._read_loop())
         log.debug("connected to %s", self.url)
 

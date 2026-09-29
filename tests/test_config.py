@@ -49,3 +49,11 @@ def test_corrupt_or_foreign_file_is_tolerated(xdg):
 def test_save_leaves_no_temp_files(xdg):
     Config().save()
     assert [p.name for p in config_path().parent.iterdir()] == ["config.json"]
+
+
+def test_websocket_pins_persist_without_being_learned_from_discovery(xdg):
+    cfg = Config(websocket_fingerprints={"10.0.0.5": "ab" * 32})
+    cfg.remember("10.0.0.5", "Kitchen", uid="RINCON_A")
+    cfg.remember("10.0.0.9", "Kitchen", uid="RINCON_A")
+    cfg.save()
+    assert Config.load().websocket_fingerprints == {"10.0.0.5": "ab" * 32}

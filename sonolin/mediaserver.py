@@ -11,8 +11,8 @@ noson-app that has no counterpart anywhere in the Python Sonos ecosystem.
 
 **Only files present in the library index are reachable.** Paths never appear in
 a URL; each track is addressed by a digest of its path, and a digest that is not
-in the index is a 404. There is no route that takes a filesystem path, so there
-is nothing to traverse. Note all the same that while this is running, anything on
+in the index is a 404. Scanning excludes file symlinks, and media reads refuse
+symlinks in every path component. While this is running, anything on
 the local network can fetch the indexed audio and art without authenticating —
 the speakers offer no way to present a credential.
 """
@@ -23,6 +23,7 @@ import asyncio
 import hashlib
 import logging
 import mimetypes
+import secrets
 import socket
 import time
 from dataclasses import dataclass, field
@@ -32,8 +33,11 @@ from aiohttp import web
 
 from . import tags as tagreader
 from .library import Library
+from .localfiles import open_regular
 
 log = logging.getLogger(__name__)
+
+CLIP_TTL = 600  # seconds
 
 CONTENT_TYPES = {
     ".flac": "audio/flac",
@@ -52,6 +56,9 @@ STREAM_FORMATS = {
     "mp3": (["-f", "mp3", "-b:a", "320k"], "audio/mpeg"),
     "wav": (["-f", "wav"], "audio/wav"),
 }
+
+# Bound continuous capture/encoding work across all formats and listeners.
+MAX_LIVE_ENCODERS = 4
 
 
 def token_for(path: str | Path) -> str:
@@ -91,6 +98,34 @@ class Clip:
     fetched: asyncio.Event = field(default_factory=asyncio.Event)
 
 
+class _LocalFileResponse(web.FileResponse):
+    """Keep aiohttp's Range support while serving a securely opened Linux fd."""
+
+    async def prepare(self, request):
+        if self.prepared:
+            return await web.StreamResponse.prepare(self, request)
+        # aiohttp opens files in an executor. Keep the pinned fd alive even if
+        # the request is cancelled while that worker is still using /proc.
+        task = asyncio.create_task(self._prepare_local(request))
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            await task
+            raise
+
+    async def _prepare_local(self, request):
+        try:
+            source = open_regular(self._path)
+        except OSError:
+            self.set_status(404)
+            return await web.StreamResponse.prepare(self, request)
+        with source:
+            # This descriptor names the opened inode even if its original name
+            # is replaced. Compressed sibling paths cannot select other files.
+            self._path = Path(f"/proc/self/fd/{source.fileno()}")
+            return await super().prepare(request)
+
+
 class MediaServer:
     """Publishes library tracks, cover art, clips and a live capture."""
 
@@ -108,6 +143,7 @@ class MediaServer:
         self.requested_port = port
         self.port: int | None = None
         self.capture_source = capture_source
+        self._live_slots = asyncio.BoundedSemaphore(MAX_LIVE_ENCODERS)
         self._clips: dict[str, Clip] = {}
         self._runner: web.AppRunner | None = None
         self._art_cache: dict[str, tuple[bytes, str]] = {}
@@ -178,13 +214,14 @@ class MediaServer:
     def add_clip(self, data: bytes, content_type: str = "audio/wav", suffix: str = "wav") -> str:
         """Publish a generated clip and return its URL.
 
-        Clips are held in memory and pruned after ten minutes; they exist only
-        long enough for the speaker to fetch them once.
+        Each publication has an unguessable URL valid for ten minutes.
+        Repeat fetches are allowed during that window for speaker retries.
         """
-        name = f"{hashlib.sha1(data[:4096] + str(len(data)).encode()).hexdigest()[:16]}.{suffix}"
-        self._clips[name] = Clip(data, content_type, time.time())
-        cutoff = time.time() - 600
-        for key in [k for k, v in self._clips.items() if v.created < cutoff]:
+        name = f"{secrets.token_urlsafe(32)}.{suffix}"
+        now = time.monotonic()
+        self._clips[name] = Clip(data, content_type, now)
+        cutoff = now - CLIP_TTL
+        for key in [k for k, v in self._clips.items() if v.created <= cutoff]:
             self._clips.pop(key, None)
         return f"{self.base_url}/clip/{name}"
 
@@ -209,7 +246,11 @@ class MediaServer:
         if self._token_source is not tracks:
             self._tokens = {token_for(t.path): t.path for t in tracks}
             self._token_source = tracks
-        return self._tokens.get(token)
+        path = self._tokens.get(token)
+        # A file can be replaced after scanning; protect music and artwork alike.
+        if path is None or path.is_symlink():
+            return None
+        return path
 
     async def _music(self, request: web.Request) -> web.StreamResponse:
         path = self._resolve(request.match_info["token"].split(".", 1)[0])
@@ -218,8 +259,8 @@ class MediaServer:
         ctype = CONTENT_TYPES.get(path.suffix.lower()) \
             or mimetypes.guess_type(path.name)[0] or "application/octet-stream"
         # FileResponse implements Range itself, which Sonos relies on to seek.
-        return web.FileResponse(path, headers={"Content-Type": ctype,
-                                               "Accept-Ranges": "bytes"})
+        return _LocalFileResponse(path, headers={"Content-Type": ctype,
+                                                "Accept-Ranges": "bytes"})
 
     async def _art(self, request: web.Request) -> web.StreamResponse:
         token = request.match_info["token"]
@@ -240,13 +281,18 @@ class MediaServer:
                             headers={"Cache-Control": "max-age=86400"})
 
     async def _clip(self, request: web.Request) -> web.StreamResponse:
-        clip = self._clips.get(request.match_info["name"])
+        name = request.match_info["name"]
+        clip = self._clips.get(name)
         if clip is None:
             raise web.HTTPNotFound()
-        log.info("clip %s fetched by %s", request.match_info["name"], request.remote)
+        if time.monotonic() - clip.created >= CLIP_TTL:
+            self._clips.pop(name, None)
+            raise web.HTTPNotFound()
+        # The URL is a bearer capability; keep it out of logs and caches.
+        log.info("clip fetched by %s", request.remote)
         clip.fetched.set()
         return web.Response(body=clip.data, content_type=clip.content_type,
-                            headers={"Accept-Ranges": "bytes"})
+                            headers={"Accept-Ranges": "bytes", "Cache-Control": "no-store"})
 
     async def wait_fetched(self, url: str, timeout: float = 20.0) -> bool:
         """Wait until the speaker has asked for a clip.
@@ -274,6 +320,15 @@ class MediaServer:
         fmt = request.match_info["fmt"].lower()
         if fmt not in STREAM_FORMATS:
             raise web.HTTPNotFound(text=f"unknown format {fmt!r}")
+        # Admission happens before source discovery or process creation. With no
+        # await between this check and an available acquire, requests cannot race
+        # for the last slot on the server's event loop. Reject rather than queue.
+        if self._live_slots.locked():
+            raise web.HTTPServiceUnavailable(text="too many live listeners")
+        async with self._live_slots:
+            return await self._stream_live(request, fmt)
+
+    async def _stream_live(self, request: web.Request, fmt: str) -> web.StreamResponse:
         args, ctype = STREAM_FORMATS[fmt]
         source = self.capture_source or await default_monitor()
         if not source:
@@ -289,14 +344,14 @@ class MediaServer:
         proc = await asyncio.create_subprocess_exec(
             *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
         )
-        response = web.StreamResponse(headers={
-            "Content-Type": ctype,
-            "Cache-Control": "no-cache, no-store",
-            # A live capture has no length and must never be treated as seekable.
-            "Accept-Ranges": "none",
-        })
-        await response.prepare(request)
         try:
+            response = web.StreamResponse(headers={
+                "Content-Type": ctype,
+                "Cache-Control": "no-cache, no-store",
+                # A live capture has no length and must never be treated as seekable.
+                "Accept-Ranges": "none",
+            })
+            await response.prepare(request)
             assert proc.stdout is not None
             while True:
                 chunk = await proc.stdout.read(16384)
@@ -308,12 +363,15 @@ class MediaServer:
         finally:
             if proc.returncode is None:
                 proc.terminate()
-                try:
-                    await asyncio.wait_for(proc.wait(), 3)
-                except asyncio.TimeoutError:
-                    proc.kill()
-            if proc.stderr is not None:
-                err = (await proc.stderr.read()).decode("utf-8", "replace").strip()
+            # Drain both pipes while reaping the encoder, so a full pipe cannot
+            # block shutdown. Keep the admission slot until the process exits.
+            try:
+                _, stderr = await asyncio.wait_for(proc.communicate(), 3)
+            except asyncio.TimeoutError:
+                proc.kill()
+                _, stderr = await proc.communicate()
+            if stderr:
+                err = stderr.decode("utf-8", "replace").strip()
                 if err:
                     log.warning("ffmpeg: %s", err)
         return response

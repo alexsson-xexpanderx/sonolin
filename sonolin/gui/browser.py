@@ -20,10 +20,12 @@ servers, asynchronously on the GUI thread, with a disk cache under
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import logging
 import math
 import os
+import socket
 from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -40,7 +42,8 @@ from PyQt6.QtGui import (
     QPainterPath, QPixmap, QPolygonF,
 )
 from PyQt6.QtNetwork import (
-    QNetworkAccessManager, QNetworkDiskCache, QNetworkReply, QNetworkRequest,
+    QNetworkAccessManager, QNetworkCacheMetaData, QNetworkDiskCache, QNetworkProxy,
+    QNetworkReply, QNetworkRequest,
 )
 from PyQt6.QtWidgets import (
     QAbstractItemView, QButtonGroup, QComboBox, QFrame, QHBoxLayout, QInputDialog,
@@ -184,6 +187,20 @@ def _shape(image: QImage, size: int, round_: bool, radius: float = 10,
 SPEAKER_PORT = 1400
 
 
+def _public_art_address(host: str, port: int) -> str:
+    """Resolve once; the request must connect to this IP, never resolve again."""
+    addresses = [ipaddress.ip_address(row[4][0]) for row in
+                 socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)]
+    if not addresses or any(
+        not ip.is_global or ip.is_multicast or ip.is_reserved
+        or (ip.version == 6 and (ip not in ipaddress.ip_network("2000::/3")
+                                or ip.sixtofour is not None or ip.teredo is not None))
+        for ip in addresses
+    ):
+        raise ValueError("non-public artwork address")
+    return str(addresses[0])
+
+
 class _Lane:
     """Work done a few at a time, the latest request first.
 
@@ -245,6 +262,8 @@ class ArtLoader(QObject):
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self.nam = QNetworkAccessManager(self)
+        # A proxy could resolve a hostname again or route to a private network.
+        self.nam.setProxy(QNetworkProxy(QNetworkProxy.ProxyType.NoProxy))
         disk = QNetworkDiskCache(self)
         disk.setCacheDirectory(str(cache_dir()))
         disk.setMaximumCacheSize(250 * 1024 * 1024)
@@ -257,6 +276,9 @@ class ArtLoader(QObject):
         #: Given an artwork address, returns a blocking function that finds a
         #: faster address for the same picture ("" for none), or None when it
         #: has nothing to offer. The function runs off the GUI thread.
+        # Only application-owned local artwork endpoints may bypass public DNS.
+        # The callback runs on the GUI thread and must use trusted app state.
+        self.local_artwork: Callable[[QUrl], bool] = lambda url: False
         self.resolver: Callable[[str], Callable[[], str] | None] | None = None
         self._aliases: dict[str, str] = {}      # address asked for -> address fetched
         self._askers: dict[str, set[str]] = {}  # address fetched -> addresses asked for
@@ -364,21 +386,89 @@ class ArtLoader(QObject):
         else:
             self._send(url)
 
-    def _send(self, url: str) -> None:
-        req = QNetworkRequest(QUrl(url))
+    def _send(self, url: str, target: QUrl | None = None, redirects: int = 0) -> None:
+        target = QUrl(url) if target is None else target
+        if (not target.isValid() or target.scheme() not in ("http", "https")
+                or not target.host() or target.userInfo() or "%" in target.host()
+                or target.port(80 if target.scheme() == "http" else 443) == 0):
+            self._finish(url, b"")
+            return
+        if not redirects:
+            cached = self.nam.cache().data(QUrl(url))
+            if cached is not None:
+                data = bytes(cached.readAll())
+                cached.close()
+                self._finish(url, data)
+                return
+        # Local exceptions require literal IPs: a trusted name must not rebind.
+        if self.local_artwork(target):
+            try:
+                address = str(ipaddress.ip_address(target.host()))
+            except ValueError:
+                self._finish(url, b"")
+            else:
+                self._send_to(url, target, redirects, address)
+            return
+        host = target.host(QUrl.ComponentFormattingOption.FullyEncoded)
+        port = target.port(80 if target.scheme() == "http" else 443)
+        job = workers.Job(_public_art_address, host, port)
+        job.signals.done.connect(lambda ip: self._send_to(url, target, redirects, ip))
+        job.signals.failed.connect(lambda _e: self._finish(url, b""))
+        self._pool.start(job)
+
+    def _send_to(self, url: str, target: QUrl, redirects: int, address: str) -> None:
+        pinned = QUrl(target)
+        pinned.setHost(address)
+        req = QNetworkRequest(pinned)
+        host = target.host(QUrl.ComponentFormattingOption.FullyEncoded)
+        authority = f"[{host}]" if ":" in host else host
+        if target.port() != -1:
+            authority += f":{target.port()}"
+        req.setRawHeader(b"Host", authority.encode("ascii"))
+        req.setPeerVerifyName(host)  # TLS certificate verification and SNI use the origin.
+        # Qt builds HTTP/2 :authority from the IP URL, ignoring our Host header.
+        req.setAttribute(QNetworkRequest.Attribute.Http2AllowedAttribute, False)
+        req.setAttribute(QNetworkRequest.Attribute.CookieLoadControlAttribute,
+                         QNetworkRequest.LoadControl.Manual)
+        req.setAttribute(QNetworkRequest.Attribute.CookieSaveControlAttribute,
+                         QNetworkRequest.LoadControl.Manual)
+        req.setAttribute(QNetworkRequest.Attribute.AuthenticationReuseAttribute,
+                         QNetworkRequest.LoadControl.Manual)
+        req.setAttribute(QNetworkRequest.Attribute.RedirectPolicyAttribute,
+                         QNetworkRequest.RedirectPolicy.ManualRedirectPolicy)
+        # Cache by the original URL ourselves, not the pinned IP shared by CDNs.
         req.setAttribute(QNetworkRequest.Attribute.CacheLoadControlAttribute,
-                         QNetworkRequest.CacheLoadControl.PreferCache)
+                         QNetworkRequest.CacheLoadControl.AlwaysNetwork)
+        req.setAttribute(QNetworkRequest.Attribute.CacheSaveControlAttribute, False)
         req.setTransferTimeout(15000)
         reply = self.nam.get(req)
-        reply.finished.connect(lambda r=reply, u=url: self._landed(u, r))
+        reply.finished.connect(lambda: self._landed(url, reply, target, redirects))
 
-    def _landed(self, url: str, reply: QNetworkReply) -> None:
+    def _landed(self, url: str, reply: QNetworkReply, target: QUrl,
+                redirects: int) -> None:
+        redirect = reply.attribute(QNetworkRequest.Attribute.RedirectionTargetAttribute)
+        ok = reply.error() == QNetworkReply.NetworkError.NoError
+        data = bytes(reply.readAll()) if ok and redirect is None else b""
+        reply.deleteLater()
+        if ok and redirect is not None and redirects < 5:
+            self._send(url, target.resolved(redirect), redirects + 1)
+            return
+        if data and not QImage.fromData(data).isNull():
+            meta = QNetworkCacheMetaData()
+            meta.setUrl(QUrl(url))
+            meta.setRawHeaders([(b"Content-Length", str(len(data)).encode("ascii"))])
+            device = self.nam.cache().prepare(meta)
+            if device is not None:
+                device.write(data)
+                self.nam.cache().insert(device)
+        self._finish(url, data)
+
+    def _finish(self, url: str, data: bytes) -> None:
         self._pending.discard(url)
         self._speaker_lane.done(url)
         image = QImage()
         askers = self._askers.get(url, set()) - {url}
-        if reply.error() == QNetworkReply.NetworkError.NoError \
-                and image.loadFromData(bytes(reply.readAll())):
+        if image.loadFromData(data):
             if image.width() > 640:  # service art is often 640 px or more
                 image = image.scaled(640, 640, Qt.AspectRatioMode.KeepAspectRatio,
                                      Qt.TransformationMode.SmoothTransformation)
@@ -393,7 +483,6 @@ class ArtLoader(QObject):
             self._failed.add(url)
             for asker in askers:  # the faster address let us down: go the slow way
                 self._use(asker, asker)
-        reply.deleteLater()
 
     def placeholder(self, entry: Entry, size: int, round_: bool = False) -> QPixmap:
         """A gradient tile for items without artwork, coloured by name.
