@@ -102,6 +102,35 @@ account or cloud is needed.
   without stopping it.
 - **Diagnostic pages (port 1400):** battery, Wi-Fi and more. Try `sonolin diag`.
 
+### Trusting a speaker for announcements
+
+Before using announcements or other WebSocket controls, explicitly trust the
+speaker's TLS certificate. Sonolin refuses connections without a matching pin;
+discovery and the public API key do not authenticate a speaker.
+
+Obtain the certificate through a trusted connection to the intended speaker
+(for example, an isolated network containing only your computer and that speaker):
+
+```bash
+openssl s_client -connect 192.168.1.14:1443 </dev/null 2>/dev/null \
+  | openssl x509 -noout -fingerprint -sha256
+```
+
+Close Sonolin, then add a `websocket_fingerprints` object to
+`$XDG_CONFIG_HOME/sonolin/config.json` (normally `~/.config/sonolin/config.json`),
+preserving other settings. Map the speaker's IP to the 64 hex digits printed
+after `=`, with or without colons:
+
+```json
+"websocket_fingerprints": {"192.168.1.14": "<verified SHA-256 fingerprint>"}
+```
+
+Never enroll a certificate obtained only over a potentially intercepted network.
+Pins persist across restarts and are never learned or replaced automatically.
+If a speaker changes IP, update the mapping after verifying the device. If its
+certificate changes, verify the replacement through a trusted connection before
+updating the pin. Existing installations must enroll their speakers too.
+
 ## Compared with noson-app
 
 **What Sonolin adds**

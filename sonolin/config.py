@@ -41,6 +41,8 @@ class Config:
     capture_source: str = ""
     tts_voice: str = "en"
     announce_volume: int = 40
+    #: Explicitly trusted SHA-256 certificate fingerprints, keyed by speaker IP.
+    websocket_fingerprints: dict[str, str] = field(default_factory=dict)
     #: Where the media server listens. Inside 1400-1410, the TCP range noson's
     #: README tells users to open, so an existing firewall rule already covers
     #: it. SoCo's event listener starts at 1400 and counts up, hence not 1400.
