@@ -434,6 +434,7 @@ def test_live_admission_limit(monkeypatch, stage):
         monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
         server = MediaServer(host="127.0.0.1")
         await server.start()
+        await server.start_stream()
         requests = []
         responses = []
         try:
@@ -516,7 +517,10 @@ def test_live_slot_recovered_after_failure(monkeypatch, failure):
                 (b"", b"")
             ] * (mediaserver.MAX_LIVE_ENCODERS + 2)
 
-        request = SimpleNamespace(match_info={"fmt": "flac"})
+        server.port = 1  # URL construction only; this test invokes the handler directly.
+        await server.start_stream()
+        request = SimpleNamespace(match_info={"fmt": "flac"},
+                                  query={"token": server._live_token})
         # Repeated failures must not consume the server's capacity permanently.
         for _ in range(mediaserver.MAX_LIVE_ENCODERS + 1):
             if failure == "no_monitor":
@@ -536,3 +540,195 @@ def test_live_slot_recovered_after_failure(monkeypatch, failure):
             assert proc.kill.call_count == 1
 
     asyncio.run(main())
+
+
+@pytest.fixture
+def live_encoder(monkeypatch):
+    from unittest.mock import AsyncMock, Mock
+
+    processes = []
+
+    async def spawn(*args, **kwargs):
+        proc = Mock(returncode=None, stdout=asyncio.StreamReader(),
+                    communicate=AsyncMock(return_value=(b"", b"")))
+        processes.append(proc)
+        return proc
+
+    monitor = AsyncMock(return_value="synthetic.monitor")
+    monkeypatch.setattr(mediaserver, "default_monitor", monitor)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    return processes, monitor
+
+
+@pytest.mark.parametrize("method", ["get", "head"])
+def test_live_requires_active_capability(tmp_path, live_encoder, monkeypatch, method):
+    processes, monitor = live_encoder
+    now = 1000.0
+    monkeypatch.setattr(mediaserver, "time", SimpleNamespace(monotonic=lambda: now))
+
+    async def check(server, lib, s):
+        nonlocal now
+
+        async def denied(url):
+            async with getattr(s, method)(url) as response:
+                assert response.status == 404
+
+        public = server.base_url + "/stream/live.flac"
+        await denied(public)
+        first = await server.start_stream()
+        await denied(public)
+        await denied(public + "?token=guessed")
+        async with s.get(server.base_url) as response:
+            assert server._live_token not in await response.text()
+        second = await server.start_stream()
+        assert first != second
+        await denied(first)
+        now += mediaserver.LIVE_IDLE_TTL
+        await denied(second)
+        third = await server.start_stream()
+        await server.stop_stream()
+        await denied(third)
+        assert not processes
+        monitor.assert_not_awaited()
+
+    serve(tmp_path, check)
+
+
+@pytest.mark.parametrize("ending", ["stop", "replace", "shutdown"])
+def test_live_revocation_closes_connected_listener(tmp_path, live_encoder, ending):
+    processes, _ = live_encoder
+
+    async def check(server, lib, s):
+        url = await server.start_stream()
+        response = await s.get(url)
+        assert response.status == 200
+        processes[0].stdout.feed_data(b"synthetic audio")
+        assert await response.content.readexactly(15) == b"synthetic audio"
+        if ending == "stop":
+            await server.stop_stream()
+        elif ending == "replace":
+            assert await server.start_stream() != url
+        else:
+            await server.stop()
+            await server.start()
+            url = server.base_url + "/stream/" + url.split("/stream/", 1)[1]
+        assert await asyncio.wait_for(response.read(), 5) == b""
+        processes[0].terminate.assert_called_once()
+        processes[0].communicate.assert_awaited_once()
+        async with s.get(url) as denied:
+            assert denied.status == 404
+        assert len(processes) == 1
+
+    serve(tmp_path, check)
+
+
+def test_live_activity_renews_capability_then_expires(tmp_path, live_encoder, monkeypatch):
+    processes, _ = live_encoder
+    now = 1000.0
+    monkeypatch.setattr(mediaserver, "time", SimpleNamespace(monotonic=lambda: now))
+
+    async def check(server, lib, s):
+        nonlocal now
+        url = await server.start_stream()
+        async with s.get(url) as response:
+            now += mediaserver.LIVE_IDLE_TTL + 1
+            processes[0].stdout.feed_data(b"audio")
+            assert await response.content.readexactly(5) == b"audio"
+            # A long running stream still permits speaker reconnects.
+            async with s.get(url) as retry:
+                assert retry.status == 200
+                processes[1].stdout.feed_eof()
+                await retry.read()
+            processes[0].stdout.feed_eof()
+            await response.read()
+        now += mediaserver.LIVE_IDLE_TTL
+        async with s.get(url) as denied:
+            assert denied.status == 404
+        assert len(processes) == 2
+
+    serve(tmp_path, check)
+
+
+@pytest.mark.parametrize("stage", ["discovery", "spawn", "cleanup"])
+def test_live_revocation_during_startup_or_cleanup(tmp_path, monkeypatch, stage):
+    from unittest.mock import AsyncMock, Mock
+
+    async def check(server, lib, s):
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        proc = Mock(returncode=None, stdout=asyncio.StreamReader())
+        proc.stdout.feed_eof()
+
+        async def monitor():
+            if stage == "discovery":
+                entered.set()
+                await release.wait()
+            return "synthetic.monitor"
+
+        async def spawn(*args, **kwargs):
+            if stage == "spawn":
+                entered.set()
+                await release.wait()
+            return proc
+
+        async def communicate():
+            if stage == "cleanup":
+                entered.set()
+                await release.wait()
+            return b"", b""
+
+        proc.communicate = AsyncMock(side_effect=communicate)
+        monkeypatch.setattr(mediaserver, "default_monitor", monitor)
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+        url = await server.start_stream()
+        request = asyncio.create_task(s.get(url))
+        await asyncio.wait_for(entered.wait(), 5)
+        stopping = asyncio.create_task(server.stop_stream())
+        await asyncio.sleep(0)
+        async with s.get(url) as denied:
+            assert denied.status == 404
+        release.set()
+        await asyncio.wait_for(stopping, 5)
+        result = await asyncio.gather(request, return_exceptions=True)
+        if isinstance(result[0], aiohttp.ClientResponse):
+            result[0].close()
+        if stage == "discovery":
+            proc.terminate.assert_not_called()
+        else:
+            proc.terminate.assert_called_once()
+            proc.communicate.assert_awaited_once()
+        assert not server._live_slots.locked()
+
+    serve(tmp_path, check)
+
+
+def test_stop_during_session_replacement_keeps_capture_disabled(tmp_path, live_encoder):
+    from unittest.mock import AsyncMock
+
+    processes, _ = live_encoder
+
+    async def check(server, lib, s):
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def cleanup():
+            entered.set()
+            await release.wait()
+            return b"", b""
+
+        url = await server.start_stream()
+        response = await s.get(url)
+        processes[0].communicate = AsyncMock(side_effect=cleanup)
+        replacing = asyncio.create_task(server.start_stream())
+        await asyncio.wait_for(entered.wait(), 5)
+        stopping = asyncio.create_task(server.stop_stream())
+        await asyncio.sleep(0)
+        release.set()
+        replacement, _ = await asyncio.wait_for(asyncio.gather(replacing, stopping), 5)
+        assert server._live_token is None
+        async with s.get(replacement) as denied:
+            assert denied.status == 404
+        await response.read()
+        processes[0].communicate.assert_awaited_once()
+
+    serve(tmp_path, check)

@@ -64,3 +64,24 @@ def test_local_songs_play_on_down_the_list(xdg, monkeypatch):
     monkeypatch.setattr(c, "enqueue", lambda sp, tracks: calls.append(("enqueue", len(tracks))))
     c.play_local_list(speaker, [Tags(path=Path(f"/m/{n}.flac")) for n in range(5)], start=2)
     assert calls == ["clear", ("enqueue", 5), ("play_from", 2)]
+
+
+def test_desktop_session_is_created_and_revoked(controller):
+    from unittest.mock import Mock
+
+    speaker = SimpleNamespace(soco=Mock())
+    url = controller.stream_desktop(speaker, "mp3")
+    assert "/stream/live.mp3?token=" in url
+    speaker.soco.play_uri.assert_called_once_with(url, title="Desktop audio")
+    controller.stop_desktop()
+    assert controller.server._live_token is None
+
+
+def test_desktop_playback_failure_revokes_session(controller):
+    from unittest.mock import Mock
+
+    speaker = SimpleNamespace(soco=Mock())
+    speaker.soco.play_uri.side_effect = OSError("speaker unreachable")
+    with pytest.raises(OSError):
+        controller.stream_desktop(speaker)
+    assert controller.server._live_token is None

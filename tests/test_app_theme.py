@@ -164,3 +164,38 @@ def test_now_playing_rejected_art_is_nonfatal():
     from sonolin.gui.app import MainWindow
 
     assert MainWindow._fetch_art("http://127.0.0.1/private", "192.168.1.20") is None
+
+
+@pytest.mark.parametrize("has_speaker", [False, True])
+def test_desktop_stop_revokes_access_without_a_reachable_speaker(app, monkeypatch, has_speaker):
+    from types import SimpleNamespace
+
+    from sonolin.controller import Controller
+    from sonolin.gui.app import MainWindow
+    from sonolin.mediaserver import MediaServer
+    from sonolin.speaker import _Loop
+
+    c = Controller([])
+    c.server = MediaServer(host="127.0.0.1")
+    _Loop.submit(c.server.start())
+    _Loop.submit(c.server.start_stream())
+    w = MainWindow(c)
+    w.timer.stop()
+    monkeypatch.setattr(w, "_run", lambda action, **kwargs: action())
+
+    def unreachable():
+        assert c.server._live_token is None
+        raise OSError("speaker unreachable")
+
+    w.current = SimpleNamespace(stop=unreachable) if has_speaker else None
+    try:
+        if has_speaker:
+            with pytest.raises(OSError):
+                w._stream_stop()
+        else:
+            w._stream_stop()
+        assert c.server._live_token is None
+    finally:
+        w.current = None
+        w.mpris.unregister()
+        c.close()
