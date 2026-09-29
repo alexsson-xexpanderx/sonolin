@@ -93,6 +93,40 @@ def test_folder_cover_is_the_fallback(tmp_path, music_dir):
     assert pic is not None and pic.mime == "image/jpeg"
 
 
+@pytest.mark.parametrize("name", ["cover", "folder", "front", "album", "albumart"])
+@pytest.mark.parametrize("ext", [".jpg", ".jpeg", ".png"])
+def test_cover_symlinks_are_ignored(tmp_path, name, ext):
+    music = tmp_path / "music"
+    music.mkdir()
+    track = music / "track.ogg"
+    track.touch()
+    secret = tmp_path / "private.txt"
+    secret.write_bytes(b"private data outside the music folder")
+    (music / f"{name}{ext}").symlink_to(secret)
+
+    assert tags.read_picture(track) is None
+
+
+@pytest.mark.parametrize("kind", ["symlink", "broken_symlink", "directory", "fifo"])
+def test_unsafe_cover_does_not_hide_later_regular_cover(tmp_path, kind):
+    track = tmp_path / "track.ogg"
+    track.touch()
+    cover = tmp_path / "cover.jpg"
+    if kind == "symlink":
+        target = tmp_path / "target"
+        target.write_bytes(b"not the cover")
+        cover.symlink_to(target)
+    elif kind == "broken_symlink":
+        cover.symlink_to(tmp_path / "missing")
+    elif kind == "directory":
+        cover.mkdir()
+    else:
+        os.mkfifo(cover)
+    (tmp_path / "folder.png").write_bytes(b"regular cover")
+
+    assert tags.read_picture(track) == tags.Picture("image/png", b"regular cover")
+
+
 @pytest.mark.parametrize("suffix", [".flac", ".mp3", ".m4a", ".ogg"])
 def test_garbage_yields_sparse_tags_not_an_exception(tmp_path, suffix):
     bad = tmp_path / f"broken{suffix}"

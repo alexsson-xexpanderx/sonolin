@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import re
+import stat
 import struct
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -496,6 +497,12 @@ def read_picture(path: str | os.PathLike) -> Picture | None:
     tags = read(path, want_picture=True)
     if tags.picture:
         return tags.picture
+
+    def open_cover(path, flags):
+        # Reject symlinks at open time, including ones swapped in during lookup.
+        # Nonblocking lets us reject FIFOs without waiting for a writer.
+        return os.open(path, flags | os.O_NOFOLLOW | os.O_NONBLOCK)
+
     folder = Path(path).parent
     for name in ("cover", "folder", "front", "album", "albumart"):
         for ext, mime in ((".jpg", "image/jpeg"), (".jpeg", "image/jpeg"), (".png", "image/png")):
