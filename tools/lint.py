@@ -4,10 +4,24 @@ No linter is installed on the development machine, and symtable does real
 scope resolution, so this catches the two mistakes that matter most after
 moving code between modules. Usage: python3 tools/lint.py sonolin/*.py
 """
-import ast, builtins, sys, symtable
+import ast, builtins, os, stat, sys, symtable
+
+MAX_SOURCE_BYTES = 1024 * 1024
 
 def check(path):
-    src = open(path).read()
+    # Check the opened file, so replacing a path cannot bypass the type check.
+    # NONBLOCK also prevents opening a FIFO from waiting for a writer.
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ValueError("source must be a regular file")
+        with os.fdopen(fd, "rb", closefd=False) as source:
+            src = source.read(MAX_SOURCE_BYTES + 1)
+    finally:
+        os.close(fd)
+    if len(src) > MAX_SOURCE_BYTES:
+        raise ValueError(f"source exceeds {MAX_SOURCE_BYTES} bytes")
+    src = src.decode("utf-8")
     tree = ast.parse(src)
     top = symtable.symtable(src, path, "exec")
     module_names = {s.get_name() for s in top.get_symbols() if s.is_assigned() or s.is_imported()}
@@ -39,8 +53,9 @@ def check(path):
             problems.append(f"line {line}: unused import {name!r}")
     return problems
 
-bad = 0
-for path in sys.argv[1:]:
-    for p in check(path):
-        print(f"{path}: {p}"); bad += 1
-print(f"{bad} problem(s) in {len(sys.argv)-1} file(s)")
+if __name__ == "__main__":
+    bad = 0
+    for path in sys.argv[1:]:
+        for p in check(path):
+            print(f"{path}: {p}"); bad += 1
+    print(f"{bad} problem(s) in {len(sys.argv)-1} file(s)")
