@@ -131,3 +131,29 @@ def test_there_is_no_toolbar_and_settings_holds_its_actions(app, monkeypatch):
         w.current = None
         w.mpris.unregister()
         style.apply(app, themes.DARK)
+
+
+def test_local_artwork_exceptions_use_app_state():
+    from types import SimpleNamespace
+
+    from PyQt6.QtCore import QUrl
+
+    from sonolin.gui.app import MainWindow
+
+    context = SimpleNamespace(c=SimpleNamespace(
+        speakers=[SimpleNamespace(ip="192.168.1.2")],
+        server_url="http://192.168.1.3:1405"))
+    allowed = lambda url: MainWindow._local_artwork(context, QUrl(url))
+    assert allowed("http://192.168.1.2:1400/getaa?s=1&u=song")
+    assert allowed("http://192.168.1.3:1405/art/" + "a" * 20)
+    for url in (
+        "http://192.168.1.9:1400/getaa", "http://192.168.1.2:80/getaa",
+        "http://192.168.1.2:1400/admin", "http://192.168.1.2:1400/getaa/../admin",
+        "http://192.168.1.3:1405/art/../admin", "http://192.168.1.3:1405/music/abc",
+        "http://192.168.1.3:1406/art/" + "a" * 20,
+    ):
+        assert not allowed(url)
+    context.c.speakers = []
+    context.c.server_url = None
+    assert not allowed("http://192.168.1.2:1400/getaa")
+    assert not allowed("http://192.168.1.3:1405/art/" + "a" * 20)

@@ -17,12 +17,13 @@ polls the play position is advanced locally.
 from __future__ import annotations
 
 import logging
+import re
 import sys
 import time
 import urllib.request
 from pathlib import Path
 
-from PyQt6.QtCore import QRectF, QSize, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QRectF, QSize, Qt, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import QAction, QColor, QFont, QIcon, QKeySequence, QPainter, QShortcut
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QFrame, QHBoxLayout, QInputDialog, QLabel, QListWidget,
@@ -299,6 +300,7 @@ class MainWindow(QMainWindow):
         self.browser = Browser(self.services, lambda: self.current)
         self.queue.set_art_loader(self.browser.loader)  # one artwork cache for both
         self.browser.loader.resolver = self._cover_lookup
+        self.browser.loader.local_artwork = self._local_artwork
         self.browser.status.connect(self._status)
         self.browser.error.connect(self._error)
         self.browser.played.connect(lambda: (self._dirty(), self._refresh_queue()))
@@ -864,6 +866,18 @@ class MainWindow(QMainWindow):
             self._load_alarms()
         elif widget is self.queue:
             self._refresh_queue()
+
+    def _local_artwork(self, url: QUrl) -> bool:
+        """Only known speakers and our own media server have local cover routes."""
+        if url.scheme() != "http":
+            return False
+        if (url.port() == 1400 and url.path() == "/getaa"
+                and url.host() in {sp.ip for sp in self.c.speakers}):
+            return True
+        base = QUrl(self.c.server_url or "")
+        return (bool(base.host()) and url.host() == base.host()
+                and url.port() == base.port()
+                and re.fullmatch(r"/art/[0-9a-f]{20}", url.path()) is not None)
 
     def _cover_lookup(self, url: str):
         """How to ask a song's service for its cover, or None if it has none.
