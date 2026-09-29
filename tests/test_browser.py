@@ -77,6 +77,24 @@ def _entry(kind, **kw):
     return Entry(**base)
 
 
+def test_home_page_keeps_library_navigation_after_preview(app, monkeypatch):
+    from PyQt6.QtWidgets import QVBoxLayout, QWidget
+
+    b = _browser(app)
+    root = [_entry("folder", title="Charts"), _entry("folder", title="Your Music")]
+    preview = [(_entry("folder", title="Playlists"), [_entry("playlist")])]
+    cards = []
+
+    def record_cards(entries):
+        cards.append(entries)
+        return QWidget()
+
+    monkeypatch.setattr(b, "_cards", record_cards)
+    page = QWidget()
+    b._home_body(QVBoxLayout(page), root, preview)
+    assert cards[-1] == root
+
+
 def test_menu_for_a_song(app):
     b = _browser(app)
     b._playlists = [SimpleNamespace(title="Kitchen"), SimpleNamespace(title="Top List")]

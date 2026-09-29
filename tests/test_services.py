@@ -1,6 +1,8 @@
 import xml.etree.ElementTree as ET
 from types import SimpleNamespace
 
+import pytest
+
 from sonolin.services import BROADCAST_PREFIX, Services, ServiceInfo, art_address, service_track
 
 
@@ -176,6 +178,73 @@ def test_home_page_opens_the_library_folder():
     assert [i.title for i in root] == ["Charts", "Your Music"]
     assert [(f.title, [i.title for i in items]) for f, items in sections] == \
         [("Playlists", ["Discover Weekly"]), ("Albums", ["Junk"])]
+
+
+def test_home_page_caps_calls_even_if_service_ignores_requested_count(monkeypatch):
+    svc = Services()
+    library = _ms_item("Your Music", item_type="collection")
+    folders = [_ms_item(f"Folder {n}", item_type="container") for n in range(1000)]
+    song = _ms_item("Song", item_type="track")
+    calls = []
+
+    def browse(name, speaker, item=None, count=100):
+        calls.append((item, count))
+        if item is None:
+            return [library]
+        if item is library:
+            return [song, *folders]  # More entries than the requested count.
+        return [song]
+
+    monkeypatch.setattr(svc, "browse", browse)
+    monkeypatch.setattr("sonolin.services.time.monotonic", lambda: 0)
+    root, sections = svc.home_page("Spotify", None)
+
+    assert root == [library]
+    assert sections == [(folder, [song]) for folder in folders[:4]]
+    assert calls == [(None, 100), (library, 100), *[(f, 60) for f in folders[:4]]]
+    # The cap applies only to automatic previews; explicit navigation still works.
+    assert svc.browse("Spotify", None, folders[-1]) == [song]
+
+
+@pytest.mark.parametrize("slow_call, expected_sections", [(None, 0), ("Your Music", 0),
+                                                         ("Folder 0", 1)])
+def test_home_page_stops_expanding_when_time_budget_expires(monkeypatch, slow_call,
+                                                           expected_sections):
+    svc = Services()
+    library = _ms_item("Your Music", item_type="collection")
+    folders = [_ms_item(f"Folder {n}", item_type="container") for n in range(3)]
+    song = _ms_item("Song", item_type="track")
+    now = [0.0]
+    calls = []
+
+    def browse(name, speaker, item=None, count=100):
+        title = item.title if item is not None else None
+        calls.append(title)
+        if title == slow_call:
+            now[0] += svc.HOME_EXPANSION_SECONDS
+        return [library] if item is None else folders if item is library else [song]
+
+    monkeypatch.setattr(svc, "browse", browse)
+    monkeypatch.setattr("sonolin.services.time.monotonic", lambda: now[0])
+    root, sections = svc.home_page("Spotify", None)
+
+    assert root == [library]
+    assert sections == [(folder, [song]) for folder in folders[:expected_sections]]
+    assert calls == [None, "Your Music", "Folder 0"][:calls.index(slow_call) + 1]
+
+
+def test_home_page_without_library_only_browses_root(monkeypatch):
+    svc = Services()
+    root = [_ms_item("Charts", item_type="collection")]
+    calls = []
+
+    def browse(name, speaker, item=None, count=100):
+        calls.append(item)
+        return root
+
+    monkeypatch.setattr(svc, "browse", browse)
+    assert svc.home_page("Spotify", None) == (root, [])
+    assert calls == [None]
 
 
 # -- "Play" continues down the list it was picked from ------------------------
