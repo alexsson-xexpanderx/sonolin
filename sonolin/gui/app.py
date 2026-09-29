@@ -1062,7 +1062,14 @@ class MainWindow(QMainWindow):
 
     def _stream_stop(self) -> None:
         self.stream.status.setText("Not streaming.")
-        self._call("stop")
+        sp = self.current
+
+        def do() -> None:
+            self.c.stop_desktop()
+            if sp is not None:
+                sp.stop()
+
+        self._run(do, then=self._dirty)
 
     # -- device ------------------------------------------------------------
 

@@ -59,6 +59,7 @@ STREAM_FORMATS = {
 
 # Bound continuous capture/encoding work across all formats and listeners.
 MAX_LIVE_ENCODERS = 4
+LIVE_IDLE_TTL = 60  # Allow initial fetches and brief speaker reconnects.
 
 
 def token_for(path: str | Path) -> str:
@@ -144,6 +145,10 @@ class MediaServer:
         self.port: int | None = None
         self.capture_source = capture_source
         self._live_slots = asyncio.BoundedSemaphore(MAX_LIVE_ENCODERS)
+        self._live_token: str | None = None
+        self._live_expires = 0.0
+        self._live_tasks: set[asyncio.Task] = set()
+        self._live_lock = asyncio.Lock()
         self._clips: dict[str, Clip] = {}
         self._runner: web.AppRunner | None = None
         self._art_cache: dict[str, tuple[bytes, str]] = {}
@@ -187,6 +192,7 @@ class MediaServer:
         return self.base_url
 
     async def stop(self) -> None:
+        await self.stop_stream()
         if self._runner is not None:
             await self._runner.cleanup()
             self._runner = None
@@ -209,7 +215,33 @@ class MediaServer:
         return f"{self.base_url}/art/{token_for(path)}"
 
     def stream_url(self, fmt: str = "flac") -> str:
-        return f"{self.base_url}/stream/live.{fmt}"
+        if self._live_token is None:
+            raise RuntimeError("no desktop stream session")
+        return f"{self.base_url}/stream/live.{fmt}?token={self._live_token}"
+
+    async def start_stream(self, fmt: str = "flac") -> str:
+        """Authorize desktop capture following an explicit local user action."""
+        if fmt not in STREAM_FORMATS:
+            raise ValueError(f"unknown format {fmt!r}")
+        async with self._live_lock:
+            await self._stop_stream()
+            self._live_token = secrets.token_urlsafe(32)
+            self._live_expires = time.monotonic() + LIVE_IDLE_TTL
+            return self.stream_url(fmt)
+
+    async def stop_stream(self) -> None:
+        """Revoke the capability and close even listeners that stay connected."""
+        # A stop arriving while start reaps old encoders must revoke the new
+        # session as well, rather than letting that start publish after stop.
+        async with self._live_lock:
+            await self._stop_stream()
+
+    async def _stop_stream(self) -> None:
+        self._live_token = None
+        tasks = list(self._live_tasks)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     def add_clip(self, data: bytes, content_type: str = "audio/wav", suffix: str = "wav") -> str:
         """Publish a generated clip and return its URL.
@@ -320,15 +352,24 @@ class MediaServer:
         fmt = request.match_info["fmt"].lower()
         if fmt not in STREAM_FORMATS:
             raise web.HTTPNotFound(text=f"unknown format {fmt!r}")
+        token = self._live_token
+        if (token is None or request.query.get("token") != token
+                or time.monotonic() >= self._live_expires):
+            raise web.HTTPNotFound()
         # Admission happens before source discovery or process creation. With no
         # await between this check and an available acquire, requests cannot race
         # for the last slot on the server's event loop. Reject rather than queue.
         if self._live_slots.locked():
             raise web.HTTPServiceUnavailable(text="too many live listeners")
         async with self._live_slots:
-            return await self._stream_live(request, fmt)
+            task = asyncio.create_task(self._stream_live(request, fmt, token))
+            self._live_tasks.add(task)
+            try:
+                return await task
+            finally:
+                self._live_tasks.discard(task)
 
-    async def _stream_live(self, request: web.Request, fmt: str) -> web.StreamResponse:
+    async def _stream_live(self, request: web.Request, fmt: str, token: str) -> web.StreamResponse:
         args, ctype = STREAM_FORMATS[fmt]
         source = self.capture_source or await default_monitor()
         if not source:
@@ -341,40 +382,59 @@ class MediaServer:
             *args, "-",
         ]
         log.info("live capture: %s", " ".join(cmd))
-        proc = await asyncio.create_subprocess_exec(
+        spawning = asyncio.create_task(asyncio.create_subprocess_exec(
             *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-        )
+        ))
+        proc = None
+        response = web.StreamResponse(headers={
+            "Content-Type": ctype,
+            "Cache-Control": "no-cache, no-store",
+            # A live capture has no length and must never be treated as seekable.
+            "Accept-Ranges": "none",
+        })
         try:
-            response = web.StreamResponse(headers={
-                "Content-Type": ctype,
-                "Cache-Control": "no-cache, no-store",
-                # A live capture has no length and must never be treated as seekable.
-                "Accept-Ranges": "none",
-            })
+            # Revocation can race subprocess creation. Recover the handle before
+            # cleanup so a cancelled request cannot leave capture running.
+            try:
+                proc = await asyncio.shield(spawning)
+            except asyncio.CancelledError:
+                proc = await spawning
+                raise
             await response.prepare(request)
             assert proc.stdout is not None
             while True:
                 chunk = await proc.stdout.read(16384)
                 if not chunk:
                     break
+                if self._live_token == token:
+                    self._live_expires = time.monotonic() + LIVE_IDLE_TTL
                 await response.write(chunk)
         except (ConnectionResetError, asyncio.CancelledError):
             log.info("live listener went away")
         finally:
-            if proc.returncode is None:
-                proc.terminate()
-            # Drain both pipes while reaping the encoder, so a full pipe cannot
-            # block shutdown. Keep the admission slot until the process exits.
-            try:
-                _, stderr = await asyncio.wait_for(proc.communicate(), 3)
-            except asyncio.TimeoutError:
-                proc.kill()
-                _, stderr = await proc.communicate()
-            if stderr:
-                err = stderr.decode("utf-8", "replace").strip()
-                if err:
-                    log.warning("ffmpeg: %s", err)
+            if proc is not None:
+                cleanup = asyncio.create_task(self._reap_live(proc))
+                try:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError:
+                    await cleanup
         return response
+
+    @staticmethod
+    async def _reap_live(proc) -> None:
+        if proc.returncode is None:
+            proc.terminate()
+        # Drain both pipes while reaping the encoder. Keep the admission slot
+        # until the process exits, including when stop interrupts cleanup.
+        try:
+            _, stderr = await asyncio.wait_for(proc.communicate(), 3)
+        except asyncio.TimeoutError:
+            proc.kill()
+            _, stderr = await proc.communicate()
+        if stderr:
+            err = stderr.decode("utf-8", "replace").strip()
+            if err:
+                log.warning("ffmpeg: %s", err)
 
 
 async def default_monitor() -> str | None:

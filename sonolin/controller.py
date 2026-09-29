@@ -322,9 +322,18 @@ class Controller:
         equivalent in any other Python Sonos library.
         """
         server = self._require_server()
-        url = server.stream_url(fmt)
-        speaker.soco.play_uri(url, title="Desktop audio")
+        url = _Loop.submit(server.start_stream(fmt))
+        try:
+            speaker.soco.play_uri(url, title="Desktop audio")
+        except Exception:
+            _Loop.submit(server.stop_stream())
+            raise
         return url
+
+    def stop_desktop(self) -> None:
+        """Stop publishing desktop audio, even if a speaker is unreachable."""
+        if self.server is not None:
+            _Loop.submit(self.server.stop_stream())
 
     def capture_sources(self) -> list[str]:
         return _Loop.submit(list_monitors())
