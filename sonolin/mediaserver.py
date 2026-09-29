@@ -11,8 +11,8 @@ noson-app that has no counterpart anywhere in the Python Sonos ecosystem.
 
 **Only files present in the library index are reachable.** Paths never appear in
 a URL; each track is addressed by a digest of its path, and a digest that is not
-in the index is a 404. There is no route that takes a filesystem path, so there
-is nothing to traverse. Note all the same that while this is running, anything on
+in the index is a 404. Scanning excludes file symlinks, and indexed paths that
+have become file symlinks are rejected when requested. While this is running, anything on
 the local network can fetch the indexed audio and art without authenticating —
 the speakers offer no way to present a credential.
 """
@@ -209,7 +209,11 @@ class MediaServer:
         if self._token_source is not tracks:
             self._tokens = {token_for(t.path): t.path for t in tracks}
             self._token_source = tracks
-        return self._tokens.get(token)
+        path = self._tokens.get(token)
+        # A file can be replaced after scanning; protect music and artwork alike.
+        if path is None or path.is_symlink():
+            return None
+        return path
 
     async def _music(self, request: web.Request) -> web.StreamResponse:
         path = self._resolve(request.match_info["token"].split(".", 1)[0])

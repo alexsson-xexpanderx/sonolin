@@ -75,6 +75,57 @@ def test_only_indexed_files_are_reachable(music_dir):
     serve(music_dir, check)
 
 
+@pytest.mark.parametrize("replace_after_scan", [False, True])
+def test_file_symlinks_are_not_served(tmp_path, monkeypatch, replace_after_scan):
+    music = tmp_path / "music"
+    music.mkdir()
+    secret = tmp_path / "private.txt"
+    secret.write_bytes(b"private data outside the music folder")
+    track = music / "song.mp3"
+    if replace_after_scan:
+        track.write_bytes(b"local track")
+    else:
+        track.symlink_to(secret)
+
+    def unexpected_picture_read(path):
+        pytest.fail("rejected paths must not reach the artwork reader")
+
+    monkeypatch.setattr("sonolin.mediaserver.tagreader.read_picture", unexpected_picture_read)
+
+    async def check(server, lib, s):
+        if replace_after_scan:
+            # Populate the token cache before replacing the indexed file.
+            async with s.get(server.music_url(track)) as r:
+                assert r.status == 200
+                assert await r.read() == b"local track"
+            track.unlink()
+            track.symlink_to(secret)
+        for url in (server.music_url(track), server.art_url(track)):
+            async with s.get(url) as r:
+                assert r.status == 404
+                assert secret.read_bytes() not in await r.read()
+
+    serve(music, check)
+
+
+def test_explicitly_added_file_outside_roots_is_served(tmp_path):
+    music = tmp_path / "music"
+    music.mkdir()
+    track = tmp_path / "one-off.mp3"
+    track.write_bytes(b"explicitly selected track")
+    link = tmp_path / "selected.mp3"
+    link.symlink_to(track)
+
+    async def check(server, lib, s):
+        added = lib.add_files([link])
+        assert [t.path for t in added] == [track]
+        async with s.get(server.music_url(added[0].path)) as r:
+            assert r.status == 200
+            assert await r.read() == track.read_bytes()
+
+    serve(music, check)
+
+
 def test_clip_publish_and_fetch_notification(music_dir):
     async def check(server, lib, s):
         url = server.add_clip(b"RIFF....WAVE", "audio/wav")
