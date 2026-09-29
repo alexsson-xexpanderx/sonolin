@@ -63,6 +63,25 @@ def test_cover_art(music_dir):
     serve(music_dir, check)
 
 
+def test_oversized_id3_art_requests(tmp_path):
+    path = tmp_path / "oversized.mp3"
+    with path.open("wb") as fh:
+        fh.write(b"ID3\x03\0\0\x7f\x7f\x7f\x7f")
+        fh.truncate(10 + (1 << 28) - 1)
+
+    async def check(server, lib, s):
+        assert lib.get(str(path)) is not None
+        for _ in range(3):
+            async with s.get(server.art_url(path)) as r:
+                assert r.status == 404
+        (tmp_path / "cover.jpg").write_bytes(b"folder art")
+        async with s.get(server.art_url(path)) as r:
+            assert r.status == 200
+            assert await r.read() == b"folder art"
+
+    serve(tmp_path, check)
+
+
 def test_only_indexed_files_are_reachable(music_dir):
     async def check(server, lib, s):
         base = server.base_url

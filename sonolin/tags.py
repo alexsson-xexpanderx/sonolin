@@ -217,6 +217,9 @@ def _read_ogg(fh, tags: Tags) -> None:
 
 # -- ID3 / MP3 -------------------------------------------------------------
 
+# Leave room for embedded artwork without allowing a header to allocate 256 MiB.
+_MAX_ID3_SIZE = 16 * 1024 * 1024
+
 _ID3_MAP = {
     "TIT2": "title", "TT2": "title",
     "TPE1": "artist", "TP1": "artist",
@@ -252,6 +255,8 @@ def _read_id3(fh, tags: Tags) -> int:
     # Syncsafe: seven bits per byte.
     size = ((size >> 24) & 0x7F) << 21 | ((size >> 16) & 0x7F) << 14 \
         | ((size >> 8) & 0x7F) << 7 | (size & 0x7F)
+    if size > _MAX_ID3_SIZE:
+        return size + 10
     blob = fh.read(size)
     if flags & 0x40:  # extended header, skip it
         try:
