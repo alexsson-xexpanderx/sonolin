@@ -60,6 +60,30 @@ def test_cover_art(music_dir):
     serve(music_dir, check)
 
 
+def test_art_does_not_disclose_cover_symlink_target(tmp_path):
+    music = tmp_path / "music"
+    music.mkdir()
+    track = music / "track.ogg"
+    track.touch()
+    secret = tmp_path / "private.txt"
+    secret.write_bytes(b"private data outside the music folder")
+    cover = music / "cover.jpg"
+    cover.symlink_to(secret)
+
+    async def check(server, lib, s):
+        async with s.get(server.art_url(track)) as r:
+            assert r.status == 404
+            assert secret.read_bytes() not in await r.read()
+        cover.unlink()
+        cover.write_bytes(b"regular cover")
+        async with s.get(server.art_url(track)) as r:
+            assert r.status == 200
+            assert r.headers["Content-Type"] == "image/jpeg"
+            assert await r.read() == b"regular cover"
+
+    serve(music, check)
+
+
 def test_only_indexed_files_are_reachable(music_dir):
     async def check(server, lib, s):
         base = server.base_url
