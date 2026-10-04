@@ -151,6 +151,7 @@ class MainWindow(QMainWindow):
         self.current: Speaker | None = None
         self._art_key: str | None = None
         self._polling = False
+        self._poll_again = False
         self._ticks = 0
         self._next_wake_check = 0.0
         self._states: dict[str, str] = {}
@@ -666,12 +667,23 @@ class MainWindow(QMainWindow):
         self._ticks += 1
         self.now.tick(TICK_MS / 1000)
         self.mpris.advance(TICK_MS / 1000)
-        if self._ticks % POLL_EVERY == 0:
+        # While the speaker is buffering, look every second: it starts playing
+        # within a moment, and waiting for the regular poll would leave the
+        # progress bar standing still for up to POLL_EVERY seconds.
+        buffering = self.current is not None and \
+            self._states.get(self.current.uid) == "TRANSITIONING"
+        if self._ticks % POLL_EVERY == 0 or buffering:
             self._poll()
 
     def _poll(self, force: bool = False) -> None:
         sp = self.current
-        if sp is None or self._polling:
+        if sp is None:
+            return
+        if self._polling:
+            # A change reported while a poll is out may be newer than what that
+            # poll reads (play goes "buffering" then "playing" within a moment);
+            # dropping it would leave the window stale until the next poll.
+            self._poll_again = self._poll_again or force
             return
         if not sp.awake and not force and time.monotonic() < self._next_wake_check:
             return
@@ -703,12 +715,18 @@ class MainWindow(QMainWindow):
 
         workers.run(gather, on_done=self._apply_poll, on_error=self._poll_failed)
 
-    def _poll_failed(self, message: str) -> None:
+    def _poll_finished(self) -> None:
         self._polling = False
+        if self._poll_again:
+            self._poll_again = False
+            QTimer.singleShot(0, lambda: self._poll(force=True))
+
+    def _poll_failed(self, message: str) -> None:
+        self._poll_finished()
         log.debug("poll failed: %s", message)
 
     def _apply_poll(self, data: dict) -> None:
-        self._polling = False
+        self._poll_finished()
         sp = self.current
         if sp is None:
             return
@@ -781,8 +799,17 @@ class MainWindow(QMainWindow):
     # -- transport and volume ---------------------------------------------
 
     def _toggle_play(self) -> None:
-        state = self._states.get(self.current.uid, "") if self.current else ""
-        self._call("pause" if state in ("PLAYING", "TRANSITIONING") else "play")
+        sp = self.current
+        state = self._states.get(sp.uid, "") if sp else ""
+        pausing = state in ("PLAYING", "TRANSITIONING")
+        self._call("pause" if pausing else "play")
+        if sp is not None:
+            # Answer the press at once rather than after the speaker confirms;
+            # the next poll puts it right if the speaker refused.
+            self._states[sp.uid] = "PAUSED_PLAYBACK" if pausing else "TRANSITIONING"
+            self.play_btn.setText("▶" if pausing else "⏸")
+            if pausing:
+                self.now.stop_moving()
 
     #: play mode -> (shuffle, repeat) where repeat is False, True or "ONE"
     PLAY_MODES = {

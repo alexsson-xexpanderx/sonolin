@@ -233,3 +233,54 @@ def test_volume_follows_the_wheel_and_clicks_not_only_drags(app, monkeypatch):
 
     finally:
         w.mpris.unregister()
+
+
+def _window_with_jobs(monkeypatch):
+    """A window whose background jobs are recorded instead of run."""
+    from types import SimpleNamespace
+
+    from sonolin.controller import Controller
+    from sonolin.gui import app as app_module
+    from sonolin.gui.app import MainWindow
+
+    jobs = []
+    monkeypatch.setattr(app_module.workers, "run", lambda fn, *a, **kw: jobs.append(fn))
+    w = MainWindow(Controller([]))
+    w.timer.stop()
+    w.current = SimpleNamespace(uid="u1", name="Kitchen", awake=True,
+                                play=lambda: None, pause=lambda: None)
+    return w, jobs
+
+
+def test_a_change_reported_during_a_poll_is_read_after_it(app, monkeypatch):
+    from PyQt6.QtTest import QTest
+
+    w, jobs = _window_with_jobs(monkeypatch)
+    try:
+        w._poll(force=True)
+        w._poll(force=True)  # "playing" arrives while "buffering" is being read
+        assert len(jobs) == 1
+        w._poll_failed("")
+        QTest.qWait(20)
+        assert len(jobs) == 2
+
+        # While buffering, the window looks every second, not every fifth.
+        w._poll_failed("")
+        w._states["u1"], w._ticks = "TRANSITIONING", 0
+        w._tick()
+        assert len(jobs) == 3
+    finally:
+        w.mpris.unregister()
+
+
+def test_play_and_pause_answer_the_press_at_once(app, monkeypatch):
+    w, jobs = _window_with_jobs(monkeypatch)
+    try:
+        w._toggle_play()
+        assert w.play_btn.text() == "⏸" and w._states["u1"] == "TRANSITIONING"
+        w.now._playing = True
+        w._toggle_play()
+        assert w.play_btn.text() == "▶" and not w.now._playing
+        assert len(jobs) == 2  # play, then pause, still sent to the speaker
+    finally:
+        w.mpris.unregister()

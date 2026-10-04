@@ -240,6 +240,10 @@ class NowPlaying(QWidget):
             self._elapsed = min(self._elapsed + seconds, self._duration)
             self._show_position()
 
+    def stop_moving(self) -> None:
+        """Hold the position where it is until the speaker says otherwise."""
+        self._playing = False
+
     def set_asleep(self, name: str) -> None:
         self._playing = False
         self.state.setText("ASLEEP")
