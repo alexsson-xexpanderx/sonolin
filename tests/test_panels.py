@@ -220,3 +220,33 @@ def test_a_click_on_the_bar_goes_straight_there(app):
         assert s.value() == 0
     finally:
         s.close()
+
+
+def test_library_columns_sort_and_play_in_the_order_shown(app):
+    from pathlib import Path
+
+    from PyQt6.QtCore import Qt
+
+    from sonolin.gui.panels import LibraryTab
+    from sonolin.tags import Tags
+
+    lib = LibraryTab()
+    songs = [Tags(Path(f"/m/{n}.mp3"), title=n, track=i, duration=d)
+             for i, (n, d) in enumerate([("Long", 721), ("Short", 65), ("Mid", 185)], 1)]
+    lib._show_tracks(songs)
+    assert [lib.tracks.item(r, 1).text() for r in range(3)] == ["Long", "Short", "Mid"]
+
+    lib.tracks.sortByColumn(3, Qt.SortOrder.AscendingOrder)  # Length: 1:05, 3:05, 12:01
+    assert [lib.tracks.item(r, 1).text() for r in range(3)] == ["Short", "Mid", "Long"]
+
+    played, removed = [], []
+    lib.play_tracks.connect(lambda tracks, start: played.append(([t.title for t in tracks], start)))
+    lib.remove.connect(removed.append)
+    lib.tracks.selectRow(1)
+    lib._play_selected()
+    assert played == [(["Short", "Mid", "Long"], 1)]
+    lib._remove_selected()
+    assert [t.title for t in removed[0]] == ["Mid"]
+
+    lib.tracks.sortByColumn(0, Qt.SortOrder.AscendingOrder)  # "#" restores the album order
+    assert [lib.tracks.item(r, 1).text() for r in range(3)] == ["Long", "Short", "Mid"]

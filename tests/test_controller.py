@@ -85,3 +85,12 @@ def test_desktop_playback_failure_revokes_session(controller):
     with pytest.raises(OSError):
         controller.stream_desktop(speaker)
     assert controller.server._live_token is None
+
+
+def test_removed_tracks_are_remembered_across_runs(xdg, music_dir):
+    from sonolin.config import Config
+
+    c = Controller([music_dir], config=Config()); c.library.scan()
+    c.hide_tracks([t for t in c.library.tracks if t.path.name == "b.mp3"])
+    again = Controller([music_dir], config=Config.load())
+    assert again.library.scan() == 3

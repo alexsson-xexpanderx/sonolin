@@ -375,6 +375,53 @@ class SoundPanel(QWidget):
         self._loading = False
 
 
+class LinkPanel(QWidget):
+    """Play a song from the web: a share link, or the address of a sound file."""
+
+    play = pyqtSignal(str)
+    enqueue = pyqtSignal(str)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.url = QLineEdit()
+        self.url.setPlaceholderText("https://suno.com/s/…")
+        self.url.setClearButtonEnabled(True)
+        self.url.returnPressed.connect(lambda: self._send(self.play))
+        play_btn = QPushButton("Play")
+        play_btn.clicked.connect(lambda: self._send(self.play))
+        queue_btn = QPushButton("Add to queue")
+        queue_btn.clicked.connect(lambda: self._send(self.enqueue))
+
+        row = QHBoxLayout()
+        row.addWidget(self.url, 1); row.addWidget(play_btn); row.addWidget(queue_btn)
+
+        self.message = QLabel("")
+        self.message.setWordWrap(True)
+        note = QLabel(
+            "A Suno share link, or any web address of a sound file (.mp3, .m4a, "
+            ".flac, .ogg). The speaker plays it straight from the web."
+        )
+        note.setWordWrap(True)
+        note.setObjectName("hint")
+
+        root = QVBoxLayout(self)
+        root.addWidget(QLabel("Paste a link to a song:"))
+        root.addLayout(row)
+        root.addWidget(self.message)
+        root.addWidget(note)
+        root.addStretch(1)
+
+    def _send(self, signal) -> None:
+        address = self.url.text().strip()
+        if address:
+            signal.emit(address)
+        else:
+            self.set_message("Paste a link first.")
+
+    def set_message(self, text: str) -> None:
+        self.message.setText(text)
+
+
 class AnnouncePanel(QWidget):
     """Speak text, or play a sound, over whatever is already playing."""
 
@@ -505,6 +552,23 @@ class StreamPanel(QWidget):
                     break
 
 
+class _SortItem(QTableWidgetItem):
+    """A cell that sorts by a value of its own rather than by its text.
+
+    Text sorts "10" before "2" and "12:01" before "3:05"; each cell carries the
+    number it stands for instead.
+    """
+
+    KEY = Qt.ItemDataRole.UserRole + 1
+
+    def __init__(self, text: str, key) -> None:
+        super().__init__(text)
+        self.setData(self.KEY, key)
+
+    def __lt__(self, other) -> bool:
+        return self.data(self.KEY) < other.data(self.KEY)
+
+
 class LibraryTab(QWidget):
     """Browse the scanned local library and send tracks to a speaker.
 
@@ -515,6 +579,7 @@ class LibraryTab(QWidget):
 
     play_tracks = pyqtSignal(list, int)   # the list shown, where to start
     enqueue = pyqtSignal(object)
+    remove = pyqtSignal(list)
     rescan = pyqtSignal()
     add_folder = pyqtSignal(str)
 
@@ -541,12 +606,18 @@ class LibraryTab(QWidget):
         head = self.tracks.horizontalHeader()
         head.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         head.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        # Unsorted until a heading is clicked, so an album opens in its own order.
+        head.setSortIndicator(-1, Qt.SortOrder.AscendingOrder)
+        self.tracks.setSortingEnabled(True)
         self.tracks.doubleClicked.connect(self._play_selected)
 
         play_btn = QPushButton("Play")
         play_btn.clicked.connect(self._play_selected)
         queue_btn = QPushButton("Add to queue")
         queue_btn.clicked.connect(self._enqueue_selected)
+        remove_btn = QPushButton("Remove")
+        remove_btn.setToolTip("Leave out of the library; the file stays in its folder")
+        remove_btn.clicked.connect(self._remove_selected)
         scan_btn = QPushButton("Rescan")
         scan_btn.clicked.connect(self.rescan.emit)
         folder_btn = QPushButton("Add folder…")
@@ -569,6 +640,7 @@ class LibraryTab(QWidget):
 
         buttons = QHBoxLayout()
         buttons.addWidget(play_btn); buttons.addWidget(queue_btn)
+        buttons.addWidget(remove_btn)
         buttons.addStretch(1)
         buttons.addWidget(folder_btn); buttons.addWidget(scan_btn)
 
@@ -594,6 +666,19 @@ class LibraryTab(QWidget):
             f"{s['tracks']} tracks · {s['albums']} albums · {s['artists']} artists · "
             f"{fmt_time(s['duration'])}"
         )
+
+    def refresh(self) -> None:
+        """Show the library again after a change, keeping the place in it."""
+        artist = self.artists.currentItem().text() if self.artists.currentItem() else ""
+        album = self.albums.currentRow()
+        self.load(self._library)
+        found = self.artists.findItems(artist, Qt.MatchFlag.MatchExactly)
+        if found:
+            self.artists.setCurrentItem(found[0])
+        if 0 <= album < self.albums.count():
+            self.albums.setCurrentRow(album)
+        if self.search.text().strip():
+            self._search_changed(self.search.text())
 
     def _artist_changed(self, name: str) -> None:
         if not hasattr(self, "_library"):
@@ -623,26 +708,44 @@ class LibraryTab(QWidget):
 
     def _show_tracks(self, tracks: list[Tags]) -> None:
         self._tracks = tracks
+        # Filling a sorted table moves rows as they are added; sort once at the end.
+        self.tracks.setSortingEnabled(False)
         self.tracks.setRowCount(len(tracks))
         for row, t in enumerate(tracks):
+            artist = t.artist or t.display_artist
             cells = (
-                str(t.track or ""), t.display_title,
-                t.artist or t.display_artist, fmt_time(t.duration),
+                # "#" sorts back to the order the list came in: disc, then track.
+                (str(t.track or ""), row),
+                (t.display_title, t.display_title.lower()),
+                (artist, artist.lower()),
+                (fmt_time(t.duration), t.duration),
             )
-            for col, value in enumerate(cells):
-                self.tracks.setItem(row, col, QTableWidgetItem(value))
+            for col, (text, key) in enumerate(cells):
+                self.tracks.setItem(row, col, _SortItem(text, key))
+        self.tracks.setSortingEnabled(True)
         self.tracks.resizeColumnToContents(0)
         self.tracks.resizeColumnToContents(3)
 
+    def _track_at(self, row: int) -> Tags:
+        """The track on a row as shown, which sorting may have moved."""
+        return self._tracks[self.tracks.item(row, 0).data(_SortItem.KEY)]
+
     def _selected(self) -> list[Tags]:
         rows = sorted({i.row() for i in self.tracks.selectedIndexes()})
-        return [self._tracks[r] for r in rows if 0 <= r < len(self._tracks)]
+        return [self._track_at(r) for r in rows if 0 <= r < len(self._tracks)]
 
     def _play_selected(self) -> None:
         rows = sorted({i.row() for i in self.tracks.selectedIndexes()})
         if rows and 0 <= rows[0] < len(self._tracks):
-            # Play on down the album or search shown, not just the one file.
-            self.play_tracks.emit(list(self._tracks), rows[0])
+            # Play on down the album or search in the order shown, not just the
+            # one file.
+            shown = [self._track_at(r) for r in range(self.tracks.rowCount())]
+            self.play_tracks.emit(shown, rows[0])
+
+    def _remove_selected(self) -> None:
+        picked = self._selected()
+        if picked:
+            self.remove.emit(picked)
 
     def _enqueue_selected(self) -> None:
         picked = self._selected()

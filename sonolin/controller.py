@@ -21,11 +21,46 @@ from . import tts
 from .config import Config
 from .events import Watcher
 from .library import Library
+from .links import Link
 from .mediaserver import MediaServer, list_monitors
 from .speaker import _Loop, Speaker, discover
 from .tags import Tags
 
 log = logging.getLogger(__name__)
+
+
+def _didl(title: str, creator: str, album: str, art: str, url: str, mime: str,
+          duration: str = "") -> str:
+    """DIDL-Lite metadata so the player shows title, artist and art.
+
+    Without this a queued URL appears as the bare URL in every controller,
+    including the official app; the speaker does not read tags itself.
+    """
+    def esc(text: str) -> str:
+        return (
+            (text or "")
+            .replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            .replace('"', "&quot;")
+        )
+
+    length = f' duration="{duration}"' if duration else ""
+    return (
+        '<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" '
+        'xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" '
+        'xmlns:r="urn:schemas-rinconnetworks-com:metadata-1-0/" '
+        'xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/">'
+        '<item id="-1" parentID="-1" restricted="true">'
+        f"<dc:title>{esc(title)}</dc:title>"
+        f"<dc:creator>{esc(creator)}</dc:creator>"
+        f"<upnp:album>{esc(album)}</upnp:album>"
+        f"<upnp:albumArtURI>{esc(art)}</upnp:albumArtURI>"
+        # The res element tells the player what the resource is. Without it,
+        # or a file extension on the URL, the player refuses to queue it
+        # (UPnP 804).
+        f'<res protocolInfo="http-get:*:{mime}:*"{length}>{esc(url)}</res>'
+        "<upnp:class>object.item.audioItem.musicTrack</upnp:class>"
+        "</item></DIDL-Lite>"
+    )
 
 
 class Controller:
@@ -36,6 +71,7 @@ class Controller:
         if music_dirs is None and self.config.music_dirs:
             music_dirs = [Path(d) for d in self.config.music_dirs if Path(d).is_dir()]
         self.library = Library(music_dirs)
+        self.library.hidden = set(self.config.hidden_tracks)
         self.speakers: list[Speaker] = []
         self.server: MediaServer | None = None
         self._watchers: dict[str, Watcher] = {}
@@ -93,10 +129,15 @@ class Controller:
 
     def _save(self) -> None:
         self.config.music_dirs = [str(r) for r in self.library.roots]
+        self.config.hidden_tracks = sorted(self.library.hidden)
         try:
             self.config.save()
         except OSError:
             log.warning("could not save settings", exc_info=True)
+
+    def hide_tracks(self, tracks: list) -> None:
+        self.library.hide(tracks)
+        self._save()
 
     def get(self, uid_or_name: str) -> Speaker | None:
         needle = uid_or_name.lower()
@@ -139,44 +180,34 @@ class Controller:
         return self.server
 
     def didl_for(self, track: Tags) -> str:
-        """DIDL-Lite metadata so the player shows title, artist and art.
-
-        Without this a queued URL appears as the bare URL in every controller,
-        including the official app; the speaker does not read tags itself.
-        """
+        """Metadata for a local track, served by the media server."""
         from .mediaserver import CONTENT_TYPES
 
         server = self._require_server()
-        art = server.art_url(track.path)
-        url = server.music_url(track.path)
-        mime = CONTENT_TYPES.get(track.path.suffix.lower(), "audio/mpeg")
         secs = int(track.duration)
-        duration = f"{secs // 3600}:{secs % 3600 // 60:02d}:{secs % 60:02d}"
-
-        def esc(text: str) -> str:
-            return (
-                (text or "")
-                .replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-                .replace('"', "&quot;")
-            )
-
-        return (
-            '<DIDL-Lite xmlns:dc="http://purl.org/dc/elements/1.1/" '
-            'xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" '
-            'xmlns:r="urn:schemas-rinconnetworks-com:metadata-1-0/" '
-            'xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/">'
-            '<item id="-1" parentID="-1" restricted="true">'
-            f"<dc:title>{esc(track.display_title)}</dc:title>"
-            f"<dc:creator>{esc(track.artist or track.display_artist)}</dc:creator>"
-            f"<upnp:album>{esc(track.album)}</upnp:album>"
-            f"<upnp:albumArtURI>{esc(art)}</upnp:albumArtURI>"
-            # The res element tells the player what the resource is. Without it,
-            # or a file extension on the URL, the player refuses to queue it
-            # (UPnP 804).
-            f'<res protocolInfo="http-get:*:{mime}:*" duration="{duration}">{esc(url)}</res>'
-            "<upnp:class>object.item.audioItem.musicTrack</upnp:class>"
-            "</item></DIDL-Lite>"
+        return _didl(
+            track.display_title, track.artist or track.display_artist, track.album,
+            server.art_url(track.path), server.music_url(track.path),
+            CONTENT_TYPES.get(track.path.suffix.lower(), "audio/mpeg"),
+            f"{secs // 3600}:{secs % 3600 // 60:02d}:{secs % 60:02d}",
         )
+
+    @staticmethod
+    def play_link(speaker: Speaker, link: Link) -> None:
+        """Play a song from the web on its own; the speaker fetches it itself."""
+        speaker.play_uri(link.url, meta=_didl(link.title, "", "", link.art, link.url, link.mime))
+
+    @staticmethod
+    def queue_link(speaker: Speaker, link: Link) -> int:
+        """Add a song from the web to the end of the queue; returns its position."""
+        reply = speaker.soco.avTransport.AddURIToQueue([
+            ("InstanceID", 0),
+            ("EnqueuedURI", link.url),
+            ("EnqueuedURIMetaData", _didl(link.title, "", "", link.art, link.url, link.mime)),
+            ("DesiredFirstTrackNumberEnqueued", 0),
+            ("EnqueueAsNext", 0),
+        ])
+        return int(reply["FirstTrackNumberEnqueued"])
 
     def enqueue(self, speaker: Speaker, tracks: list[Tags], *, play_first: bool = False) -> int:
         """Add local tracks to a speaker's queue. Returns the first position used."""

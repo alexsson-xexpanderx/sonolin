@@ -31,6 +31,7 @@ from PyQt6.QtWidgets import (
     QStyledItemDelegate, QToolButton, QVBoxLayout, QWidget,
 )
 
+from .. import links
 from ..controller import Controller
 from ..artwork import fetch_art
 from ..speaker import Speaker
@@ -44,7 +45,7 @@ from .nav import NavList
 from .nav import icon as nav_icon
 from .panels import (
     AlarmsTab, AnnouncePanel, DevicePanel, FavouritesTab, JumpSlider, LibraryTab, LinkDialog,
-    NowPlaying, QueueTab, SoundPanel, StreamPanel,
+    LinkPanel, NowPlaying, QueueTab, SoundPanel, StreamPanel,
 )
 
 log = logging.getLogger(__name__)
@@ -52,7 +53,7 @@ log = logging.getLogger(__name__)
 #: The pages, as the side bar lists them: (heading, [(name, icon), …]).
 PAGES = [
     ("MUSIC", [("Queue", "queue"), ("Library", "library"), ("Browse", "browse"),
-               ("Favourites", "favourites")]),
+               ("Favourites", "favourites"), ("Link", "link")]),
     ("SPEAKER", [("Sound", "sound"), ("Alarms", "alarms"), ("Announce", "announce"),
                  ("Stream desktop", "stream"), ("Device", "device")]),
 ]
@@ -294,6 +295,7 @@ class MainWindow(QMainWindow):
         self.library = LibraryTab()
         self.library.play_tracks.connect(self._play_local)
         self.library.enqueue.connect(self._enqueue_local)
+        self.library.remove.connect(self._hide_tracks)
         self.library.rescan.connect(self._scan)
         self.library.add_folder.connect(self._add_folder)
 
@@ -327,6 +329,10 @@ class MainWindow(QMainWindow):
         self.alarms.delete.connect(self._delete_alarm)
         self.alarms.reload.connect(self._load_alarms)
 
+        self.link = LinkPanel()
+        self.link.play.connect(lambda address: self._play_link(address, queue=False))
+        self.link.enqueue.connect(lambda address: self._play_link(address, queue=True))
+
         self.sound = SoundPanel()
         self.sound.changed.connect(self._sound_changed)
 
@@ -359,13 +365,13 @@ class MainWindow(QMainWindow):
 
         # In the order `PAGES` lists them.
         self.pages = QStackedWidget()
-        for widget in (self.queue, self.library, self.browser, self.favourites,
+        for widget in (self.queue, self.library, self.browser, self.favourites, self.link,
                        self.sound, self.alarms, self.announce, self.stream, self.device):
             self.pages.addWidget(widget)
         self.pages.currentChanged.connect(self._page_changed)
         self.nav.page_chosen.connect(self.pages.setCurrentIndex)
         self.nav.set_page(0)
-        for n in range(self.pages.count()):  # Ctrl+1 … Ctrl+9
+        for n in range(min(self.pages.count(), 9)):  # Ctrl+1 … Ctrl+9
             QShortcut(QKeySequence(f"Ctrl+{n + 1}"), self,
                       activated=lambda n=n: self.nav.set_page(n))
         pane = QFrame(); pane.setObjectName("pagePane")
@@ -1026,6 +1032,12 @@ class MainWindow(QMainWindow):
 
     # -- local library -----------------------------------------------------
 
+    def _hide_tracks(self, tracks: list) -> None:
+        self.c.hide_tracks(tracks)
+        self.library.refresh()
+        what = f"“{tracks[0].display_title}”" if len(tracks) == 1 else f"{len(tracks)} tracks"
+        self._status(f"Removed {what} from the library. The files are still in their folders.")
+
     def _add_folder(self, folder: str) -> None:
         if Path(folder) not in self.c.library.roots:
             self.c.library.roots.append(Path(folder))
@@ -1058,6 +1070,36 @@ class MainWindow(QMainWindow):
         self._run(self.c.enqueue, self.current, tracks,
                   ok=f"Queued {len(tracks)} track(s).",
                   then=lambda: (self._update_server_label(), self._refresh_queue()))
+
+    def _play_link(self, address: str, queue: bool) -> None:
+        sp = self.current
+        if sp is None:
+            self._status("Pick a speaker first.")
+            return
+        self.link.set_message("Opening the link…")
+        self._status("Opening the link…", busy=True)
+
+        def job():
+            link = links.resolve(address)
+            (self.c.queue_link if queue else self.c.play_link)(sp, link)
+            return link
+
+        def done(link) -> None:
+            self.busy.hide()
+            said = f"Added “{link.title}” to the queue." if queue else f"Playing “{link.title}”."
+            self.link.set_message(said)
+            self._status(said)
+            self._refresh_queue() if queue else self._dirty()
+
+        def failed(message: str) -> None:
+            self.busy.hide()
+            # resolve() words its own errors; anything else came from the speaker.
+            plain = message.removeprefix("ValueError: ")
+            said = plain if plain != message else f"The speaker could not play it ({message})."
+            self.link.set_message(said)
+            self._status(f"⚠  {said}")
+
+        workers.run(job, on_done=done, on_error=failed)
 
     # -- announcements -----------------------------------------------------
 

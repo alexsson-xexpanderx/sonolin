@@ -36,6 +36,8 @@ class KnownSpeaker:
 class Config:
     speakers: list[KnownSpeaker] = field(default_factory=list)
     music_dirs: list[str] = field(default_factory=list)
+    #: Files removed from the library by the user; they are left on disk.
+    hidden_tracks: list[str] = field(default_factory=list)
     last_speaker: str = ""
     stream_format: str = "flac"
     capture_source: str = ""

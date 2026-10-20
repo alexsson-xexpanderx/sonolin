@@ -76,3 +76,23 @@ def test_add_files_indexes_one_offs_once(music_dir):
     before = lib.tracks
     lib.add_files([music_dir / "b.mp3"])
     assert lib.tracks is not before, "must be a new list so the server re-indexes"
+
+
+def test_overlapping_folders_list_each_file_once(tmp_path, music_dir):
+    import shutil
+
+    inner = tmp_path / "Downloads" / "Music"
+    inner.mkdir(parents=True)
+    shutil.copy(music_dir / "a.flac", inner / "a.flac")
+    lib = Library([tmp_path / "Downloads", inner, inner])
+    assert lib.scan() == 1
+
+
+def test_hidden_tracks_stay_out_after_a_rescan(music_dir):
+    lib = Library([music_dir]); lib.scan()
+    gone = next(t for t in lib.tracks if t.path.name == "b.mp3")
+    lib.hide([gone])
+    assert len(lib.tracks) == 3 and lib.get(str(gone.path)) is None
+    assert lib.scan() == 3
+    assert "b.mp3" not in {t.path.name for t in lib.tracks}
+    assert (music_dir / "b.mp3").is_file()  # only left out, never deleted

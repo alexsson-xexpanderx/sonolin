@@ -70,12 +70,17 @@ class Library:
         self.roots: list[Path] = roots if roots is not None else default_music_dirs()
         self.tracks: list[Tags] = []
         self._by_path: dict[str, Tags] = {}
+        #: Paths the user removed from the library; the files stay on disk.
+        self.hidden: set[str] = set()
         self._lock = threading.RLock()
         self.scanning = False
 
     # -- scanning ----------------------------------------------------------
 
     def walk(self) -> Iterator[Path]:
+        # Folders may overlap (Downloads and Downloads/Music); without this
+        # every file in the inner one would be listed twice.
+        seen: set[Path] = set()
         for root in self.roots:
             # The user may select a linked root; descendants are untrusted.
             root = root.resolve()
@@ -85,7 +90,8 @@ class Library:
                     if Path(name).suffix.lower() in AUDIO_SUFFIXES:
                         path = Path(dirpath) / name
                         # os.walk's followlinks=False only excludes directory links.
-                        if not path.is_symlink():
+                        if not path.is_symlink() and path not in seen:
+                            seen.add(path)
                             yield path
 
     def scan(self, progress: Callable[[int, Path], None] | None = None) -> int:
@@ -99,6 +105,8 @@ class Library:
         found: list[Tags] = []
         try:
             for count, path in enumerate(self.walk(), 1):
+                if str(path) in self.hidden:
+                    continue
                 try:
                     found.append(tagreader.read(path))
                 except Exception:
@@ -133,6 +141,14 @@ class Library:
                 added.append(t)
             self.tracks = tracks  # a new list, so the media server re-indexes
         return added
+
+    def hide(self, tracks: list[Tags]) -> None:
+        """Leave these out of the library, now and after every rescan."""
+        with self._lock:
+            gone = {str(t.path) for t in tracks}
+            self.hidden |= gone
+            self.tracks = [t for t in self.tracks if str(t.path) not in gone]
+            self._by_path = {str(t.path): t for t in self.tracks}
 
     def get(self, path: str) -> Tags | None:
         with self._lock:

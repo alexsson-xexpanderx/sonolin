@@ -284,3 +284,24 @@ def test_play_and_pause_answer_the_press_at_once(app, monkeypatch):
         assert len(jobs) == 2  # play, then pause, still sent to the speaker
     finally:
         w.mpris.unregister()
+
+
+def test_the_link_page_plays_what_it_is_given(app, monkeypatch):
+    from sonolin.gui import app as app_module
+    from sonolin.links import Link
+
+    w, jobs = _window_with_jobs(monkeypatch)
+    played = []
+    monkeypatch.setattr(app_module.links, "resolve",
+                        lambda address: Link(address + ".mp3", "Song"))
+    monkeypatch.setattr(w.c, "play_link", lambda sp, link: played.append(link.url))
+    try:
+        w.link._send(w.link.play)
+        assert w.link.message.text() == "Paste a link first." and not jobs
+        w.link.url.setText("https://example.com/s/1")
+        w.link.url.returnPressed.emit()
+        assert len(jobs) == 1
+        jobs[0]()  # what the worker thread would run
+        assert played == ["https://example.com/s/1.mp3"]
+    finally:
+        w.mpris.unregister()
