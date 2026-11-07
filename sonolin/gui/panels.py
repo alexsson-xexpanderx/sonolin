@@ -12,13 +12,16 @@ import logging
 import datetime
 from types import SimpleNamespace
 
-from PyQt6.QtCore import QEvent, QObject, QSize, Qt, QTime, QTimer, QUrl, pyqtSignal
+from PyQt6.QtCore import (
+    QEvent, QObject, QRectF, QSize, Qt, QTime, QTimer, QUrl, pyqtSignal,
+)
 from PyQt6.QtGui import (
-    QColor, QDesktopServices, QFont, QFontDatabase, QFontMetrics, QIcon, QPixmap,
+    QColor, QDesktopServices, QFont, QFontDatabase, QFontMetrics, QIcon, QPainter, QPen,
+    QPixmap,
 )
 from PyQt6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
-    QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget,
+    QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget,
     QListWidgetItem, QPushButton, QSlider, QSpinBox, QSplitter, QStyle, QStyleOptionSlider,
     QTableWidget, QTableWidgetItem, QTextEdit, QTimeEdit, QVBoxLayout, QWidget,
 )
@@ -26,6 +29,8 @@ from PyQt6.QtWidgets import (
 from ..alarms import DAY_NAMES, RECURRENCES, describe_recurrence
 from ..tags import Tags
 from . import style
+from .nav import paint_icon
+from .visualizer import Visualizer
 
 log = logging.getLogger(__name__)
 
@@ -110,10 +115,57 @@ class JumpSlider(QSlider):
         super().mousePressEvent(event)
 
 
+class RoundButton(QPushButton):
+    """A transport button: a smooth circle with its symbol in the exact middle.
+
+    Text symbols (⏮ ⏸ ↻) sit wherever their font puts them, never quite
+    central, and a style-sheet radius is drawn with jagged edges; both are
+    painted here instead, in the theme's colours at paint time.
+    """
+
+    def __init__(self, icon: str, tip: str, size: int = 40, primary: bool = False) -> None:
+        super().__init__()
+        self.icon_name = icon
+        self._primary = primary
+        self.setFixedSize(size, size)
+        self.setToolTip(tip)
+        self.setAccessibleName(tip)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def set_icon(self, name: str) -> None:
+        self.icon_name = name
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        C = style.C
+        hover, down, on = self.underMouse(), self.isDown(), self.isChecked()
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        if self._primary:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(C["accent_hi"] if hover or down else C["accent"]))
+            ink = C["on_accent"]
+        else:
+            edge = C["accent"] if on else C["accent_lo"] if hover else C["border"]
+            painter.setPen(QPen(QColor(edge), 1))
+            painter.setBrush(QColor(C["accent_lo"] if down else C["hover"] if hover
+                                    else C["raised"]))
+            ink = C["accent"] if on else C["text"]
+        painter.drawEllipse(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5))
+        side = self.width() * 0.45
+        paint_icon(painter, self.icon_name, ink,
+                   QRectF((self.width() - side) / 2, (self.height() - side) / 2, side, side))
+        painter.end()
+
+
 class NowPlaying(QWidget):
-    """Cover art, track text and position for the selected speaker."""
+    """Cover art, track text, details and position for the selected speaker."""
 
     seek_requested = pyqtSignal(float)
+
+    #: The cover fills the card's height, within these bounds.
+    ART_MIN, ART_MAX = 140, 300
+    COMPACT_ART = 64
 
     def __init__(self) -> None:
         super().__init__()
@@ -126,7 +178,8 @@ class NowPlaying(QWidget):
 
         self.art = QLabel("♪")
         self.art.setObjectName("coverArt")
-        self.art.setFixedSize(QSize(176, 176))
+        self.art.setMinimumSize(self.ART_MIN, self.ART_MIN)
+        self.art.setMaximumHeight(self.ART_MAX)
         self.art.setAlignment(Qt.AlignmentFlag.AlignCenter)
         f = QFont(); f.setPointSize(40)
         self.art.setFont(f)
@@ -154,13 +207,40 @@ class NowPlaying(QWidget):
         bar.addWidget(self.position, 1)
         bar.addWidget(self.total)
 
+        # Where the song comes from and, for a Library file, what it is. A
+        # separate column, because the card is wide and the text is short.
+        self.details = QWidget()
+        self.details.setObjectName("trackDetails")
+        self.details.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self._detail_grid = QGridLayout(self.details)
+        self._detail_grid.setContentsMargins(16, 2, 4, 2)
+        self._detail_grid.setHorizontalSpacing(16)
+        self._detail_grid.setVerticalSpacing(5)
+        self.details.hide()
+
+        info = QVBoxLayout()
+        info.setSpacing(4)
+        info.addWidget(self.state)
+        info.addWidget(self.title)
+        info.addWidget(self.artist)
+        info.addWidget(self.album)
+        info.addStretch(1)
+
+        # Between the title and the details, from the top of the card down to
+        # the progress bar: the one area with room at any window size. Below
+        # the title there is space only when the window is very tall.
+        self.visualizer = Visualizer()
+        self.visualizer.hide()
+
+        top = QHBoxLayout()
+        top.setSpacing(24)
+        top.addLayout(info)
+        top.addWidget(self.visualizer, 1)
+        top.addWidget(self.details, 0, Qt.AlignmentFlag.AlignTop)
+
         text = QVBoxLayout()
-        text.setSpacing(4)
-        text.addWidget(self.state)
-        text.addWidget(self.title)
-        text.addWidget(self.artist)
-        text.addWidget(self.album)
-        text.addStretch(1)
+        text.addLayout(top, 1)
+        text.addSpacing(6)
         text.addLayout(bar)
 
         root = QHBoxLayout(self)
@@ -171,6 +251,45 @@ class NowPlaying(QWidget):
         self._root = root
         self._art_data: bytes | None = None
         self.compact = False
+        self._details: list[tuple[str, str]] = []
+        self._has_track = False
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._fit_art()
+
+    def _fit_art(self) -> None:
+        """Make the cover as tall as the card allows, and as wide as it is tall.
+
+        Only the width is fixed here; the height comes from the layout. Fixing
+        the height too would make the cover hold the card at its current size,
+        and the divider above the pages could then never be dragged back up.
+        """
+        if self.compact:
+            return
+        margins = self._root.contentsMargins()
+        side = max(self.ART_MIN,
+                   min(self.ART_MAX, self.height() - margins.top() - margins.bottom()))
+        if side != self.art.width() or self.art.maximumHeight() != side:
+            self.art.setFixedWidth(side)
+            self.art.setMaximumHeight(side)
+            self.set_art(self._art_data)
+
+    def set_details(self, rows: list[tuple[str, str]]) -> None:
+        """Show (label, value) pairs beside the title; none hides the column."""
+        rows = [(k, v) for k, v in rows if v]
+        if rows == self._details:
+            return
+        self._details = rows
+        grid = self._detail_grid
+        while grid.count():
+            grid.takeAt(0).widget().deleteLater()
+        for row, (key, value) in enumerate(rows):
+            k = QLabel(key); k.setObjectName("detailKey")
+            v = QLabel(value); v.setObjectName("detailValue")
+            grid.addWidget(k, row, 0)
+            grid.addWidget(v, row, 1)
+        self.details.setVisible(bool(rows) and not self.compact)
 
     def set_compact(self, on: bool) -> None:
         """Shrink to a slim bar while a tab needs the room, e.g. browsing.
@@ -181,24 +300,33 @@ class NowPlaying(QWidget):
         if on == self.compact:
             return
         self.compact = on
-        size = 64 if on else 176
-        self.art.setFixedSize(QSize(size, size))
+        if on:
+            self.art.setMinimumSize(self.COMPACT_ART, self.COMPACT_ART)
+            self.art.setFixedSize(QSize(self.COMPACT_ART, self.COMPACT_ART))
+        else:
+            self.art.setMinimumSize(self.ART_MIN, self.ART_MIN)
+            self.art.setMaximumSize(self.ART_MAX, self.ART_MAX)
         f = QFont(); f.setPointSize(18 if on else 40)
         self.art.setFont(f)
         self.album.setVisible(not on)
+        self.details.setVisible(bool(self._details) and not on)
+        self.visualizer.setVisible(self._has_track and not on)
         self._root.setContentsMargins(*((12, 10, 18, 10) if on else (18, 18, 22, 18)))
         self._root.setSpacing(16 if on else 22)
         self.title.setProperty("compact", "true" if on else "false")
         self.title.style().unpolish(self.title)
         self.title.style().polish(self.title)
+        self._fit_art()
         self.set_art(self._art_data)
 
     def _released(self) -> None:
         self._dragging = False
         if self._duration > 0:
-            self.seek_requested.emit(self.position.value() / 1000 * self._duration)
+            self._elapsed = self.position.value() / 1000 * self._duration
+            self.visualizer.sync(self._elapsed, self._playing)
+            self.seek_requested.emit(self._elapsed)
 
-    def set_track(self, info: dict, state: str, source: str = "") -> None:
+    def set_track(self, info: dict, state: str) -> None:
         title = info.get("title") or ""
         uri = info.get("uri") or ""
         if not title and uri:
@@ -208,7 +336,7 @@ class NowPlaying(QWidget):
         self.album.setText(info.get("album") or "")
         label = {"PLAYING": "PLAYING", "PAUSED_PLAYBACK": "PAUSED",
                  "STOPPED": "STOPPED", "TRANSITIONING": "BUFFERING"}.get(state, state)
-        self.state.setText(f"{label}{f'  ·  {source.upper()}' if source else ''}")
+        self.state.setText(label)
         self._duration = parse_time(info.get("duration", ""))
         if self._duration:
             self.total.setText(fmt_time(self._duration))
@@ -219,6 +347,9 @@ class NowPlaying(QWidget):
         self._playing = state == "PLAYING"
         self._elapsed = parse_time(info.get("position", ""))
         self._show_position()
+        self._has_track = bool(title or uri)
+        self.visualizer.setVisible(self._has_track and not self.compact)
+        self.visualizer.sync(self._elapsed, self._playing)
 
     def _show_position(self) -> None:
         if self._dragging:
@@ -246,6 +377,10 @@ class NowPlaying(QWidget):
 
     def set_asleep(self, name: str) -> None:
         self._playing = False
+        self.set_details([])
+        self._has_track = False
+        self.visualizer.sync(0.0, False)
+        self.visualizer.hide()
         self.state.setText("ASLEEP")
         self.title.setText(f"{name} is not answering")
         self.artist.setText("Battery speakers drop off the network when idle.")
@@ -932,6 +1067,11 @@ class QueueTab(QWidget):
         # differently in the queue and in the transport; the body identifies
         # the song.
         return bool(a) and a.split("?", 1)[0] == b.split("?", 1)[0]
+
+    def playing_place(self) -> tuple[int, int] | None:
+        """(song number, queue length) when the speaker is playing from the queue."""
+        row = getattr(self, "_playing_row", -1)
+        return (row + 1, len(getattr(self, "_uris", []))) if row >= 0 else None
 
     def _show_playing(self) -> None:
         position, uri, _state = getattr(self, "_now", (0, "", ""))

@@ -139,41 +139,23 @@ QPushButton#segment:checked {{
     letter-spacing: 1px;
     color: {C['accent']};
 }}
+#trackDetails {{
+    border-left: 1px solid {C['border']};
+    border-radius: 0;
+    background: transparent;
+}}
+#detailKey {{
+    color: {C['muted']};
+    font-size: 9.5pt;
+}}
+#detailValue {{
+    color: {C['text']};
+    font-size: 9.5pt;
+}}
 #timeLabel {{
     color: {C['muted']};
     font-size: 9pt;
     min-width: 42px;
-}}
-
-/* ---- transport ------------------------------------------------------ */
-#transport QPushButton {{
-    background: {C['raised']};
-    border: 1px solid {C['border']};
-    border-radius: 20px;
-    min-width: 40px; max-width: 40px;
-    min-height: 40px; max-height: 40px;
-    font-size: 12pt;
-    padding: 0;
-}}
-#transport QPushButton:hover {{
-    background: {C['hover']};
-    border-color: {C['accent_lo']};
-}}
-#transport QPushButton:checked {{
-    color: {C['accent']};
-    border-color: {C['accent']};
-}}
-#transport QPushButton#playButton {{
-    background: {C['accent']};
-    border: none;
-    border-radius: 26px;
-    min-width: 52px; max-width: 52px;
-    min-height: 52px; max-height: 52px;
-    font-size: 15pt;
-    color: {C['on_accent']};
-}}
-#transport QPushButton#playButton:hover {{
-    background: {C['accent_hi']};
 }}
 
 /* ---- general controls ----------------------------------------------- */

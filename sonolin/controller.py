@@ -13,20 +13,60 @@ and a different UI could be dropped on top without touching any of it.
 from __future__ import annotations
 
 import logging
+import re
 import threading
 from collections.abc import Callable
 from pathlib import Path
+from urllib.parse import parse_qs
 
 from . import tts
 from .config import Config
 from .events import Watcher
 from .library import Library
 from .links import Link
-from .mediaserver import MediaServer, list_monitors
+from .mediaserver import MediaServer, list_monitors, token_for
 from .speaker import _Loop, Speaker, discover
 from .tags import Tags
 
 log = logging.getLogger(__name__)
+
+#: Sources a speaker names by the scheme of what it plays, not by a service.
+_SCHEMES = {
+    "x-rincon-stream": "Line-in", "x-sonos-htastream": "TV", "x-file-cifs": "Shared folder",
+    "x-rincon-mp3radio": "Radio", "x-sonosapi-stream": "Radio", "x-sonosapi-radio": "Radio",
+    "x-sonosapi-hls": "Radio", "aac": "Radio", "hls-radio": "Radio",
+    "x-sonos-spotify": "Spotify",
+}
+#: A song served by this machine's media server: /music/<token>.<suffix>
+_LOCAL = re.compile(r"/music/([0-9a-f]{20})\.\w+$")
+
+
+def source_of(uri: str, service_name: Callable[[int], str] = lambda sid: "") -> str:
+    """Where a song a speaker is playing comes from, in a word or two."""
+    if not uri:
+        return ""
+    if "/stream/live." in uri:
+        return "This computer"
+    scheme = uri.split(":", 1)[0].lower()
+    sid = parse_qs(uri.partition("?")[2]).get("sid", [""])[0]
+    # A song from a service names it by number (Spotify is 9, TuneIn 303).
+    if sid.isdigit() and (name := service_name(int(sid))):
+        return name
+    if scheme in _SCHEMES:
+        return _SCHEMES[scheme]
+    if scheme in ("http", "https"):
+        return "Web link"
+    return "A music service" if sid else ""
+
+
+def describe_format(track: Tags) -> str:
+    """E.g. "FLAC · 44.1 kHz · stereo", leaving out what the file does not say."""
+    parts = [track.path.suffix.lstrip(".").upper()]
+    if track.sample_rate:
+        parts.append(f"{track.sample_rate / 1000:g} kHz")
+    if track.channels:
+        parts.append({1: "mono", 2: "stereo"}.get(track.channels, f"{track.channels} channels"))
+    return " · ".join(p for p in parts if p)
 
 
 def _didl(title: str, creator: str, album: str, art: str, url: str, mime: str,
@@ -134,6 +174,21 @@ class Controller:
             self.config.save()
         except OSError:
             log.warning("could not save settings", exc_info=True)
+
+    def local_track(self, uri: str) -> Tags | None:
+        """The Library song behind a speaker's URI, if this computer serves it.
+
+        Matched by the token in the address rather than by the server's own
+        address, so a song queued before the app last started is still found.
+        """
+        found = _LOCAL.search(uri.split("?", 1)[0])
+        if not found:
+            return None
+        tracks = self.library.tracks
+        if getattr(self, "_token_source", None) is not tracks:
+            self._tokens = {token_for(t.path): t for t in tracks}
+            self._token_source = tracks
+        return self._tokens.get(found.group(1))
 
     def hide_tracks(self, tracks: list) -> None:
         self.library.hide(tracks)

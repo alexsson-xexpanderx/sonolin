@@ -94,3 +94,37 @@ def test_removed_tracks_are_remembered_across_runs(xdg, music_dir):
     c.hide_tracks([t for t in c.library.tracks if t.path.name == "b.mp3"])
     again = Controller([music_dir], config=Config.load())
     assert again.library.scan() == 3
+
+
+@pytest.mark.parametrize("uri, expected", [
+    ("x-sonos-spotify:spotify%3atrack%3a1l5L?sid=9&flags=8232&sn=2", "Spotify (by number)"),
+    ("x-sonos-spotify:spotify%3atrack%3a1l5L?flags=8232", "Spotify"),
+    ("x-sonosapi-stream:s24861?sid=254&flags=8224", "Radio"),
+    ("x-rincon-stream:RINCON_000", "Line-in"),
+    ("x-sonos-htastream:RINCON_000:spdif", "TV"),
+    ("http://192.168.1.2:1405/stream/live.flac", "This computer"),
+    ("https://cdn.example/clip/1.mp3", "Web link"),
+    ("x-sonos-http:song%3a1.mp4?sid=204&flags=8224", "A music service"),
+    ("", ""),
+])
+def test_where_a_song_comes_from_in_plain_words(uri, expected):
+    from sonolin.controller import source_of
+
+    names = {9: "Spotify (by number)"}
+    assert source_of(uri, lambda sid: names.get(sid, "")) == expected
+
+
+def test_a_library_song_is_found_from_its_address(xdg, music_dir):
+    from sonolin.config import Config
+    from sonolin.controller import describe_format
+    from sonolin.mediaserver import token_for
+
+    c = Controller([music_dir], config=Config()); c.library.scan()
+    song = next(t for t in c.library.tracks if t.path.suffix == ".flac")
+    uri = f"http://10.0.0.5:1405/music/{token_for(song.path)}.flac"
+    assert c.local_track(uri) is song
+    assert c.local_track("http://10.0.0.5:1405/music/" + "0" * 20 + ".flac") is None
+    assert c.local_track("x-sonos-spotify:spotify%3atrack%3a1?sid=9") is None
+    assert describe_format(song) == "FLAC · 44.1 kHz · stereo"
+    assert describe_format(Tags(Path("a.mp3"), channels=1, sample_rate=48000)) == \
+        "MP3 · 48 kHz · mono"

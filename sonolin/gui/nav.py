@@ -61,6 +61,25 @@ def _sun() -> str:
     return f'<circle cx="12" cy="12" r="4"/><path d="{rays}"/>'
 
 
+# The transport's symbols. Each is centred on (12, 12), the play triangle on
+# its visual middle, which sits right of its box's middle.
+ICONS.update({
+    "play": '<path fill="currentColor" d="M8.5 5.6v12.8a.8.8 0 0 0 1.2.7l10-6.4a.8.8 0 0 0 0-1.4'
+            'l-10-6.4a.8.8 0 0 0-1.2.7z"/>',
+    "pause": '<rect fill="currentColor" x="6.5" y="5" width="4" height="14" rx="1"/>'
+             '<rect fill="currentColor" x="13.5" y="5" width="4" height="14" rx="1"/>',
+    "stop": '<rect fill="currentColor" x="6.5" y="6.5" width="11" height="11" rx="1.5"/>',
+    "previous": '<path d="M6.5 6v12"/>'
+                '<path fill="currentColor" d="M18 6.6v10.8a.6.6 0 0 1-.9.5L9 12.5a.6.6 0 0 1 0-1'
+                'l8.1-5.4a.6.6 0 0 1 .9.5z"/>',
+    "next": '<path d="M17.5 6v12"/>'
+            '<path fill="currentColor" d="M6 6.6v10.8a.6.6 0 0 0 .9.5L15 12.5a.6.6 0 0 0 0-1'
+            'L6.9 6.1a.6.6 0 0 0-.9.5z"/>',
+    "shuffle": '<path d="M16 4h4v4M4 20L20 4M20 16v4h-4M14.5 14.5L20 20M4 4l5 5"/>',
+    "repeat": '<path d="M17 2.5l3.5 3.5-3.5 3.5"/><path d="M3.5 11V9.5a3.5 3.5 0 0 1 3.5-3.5h13.5"/>'
+              '<path d="M7 21.5L3.5 18 7 14.5"/><path d="M20.5 13v1.5a3.5 3.5 0 0 1-3.5 3.5H3.5"/>',
+})
+ICONS["repeat_one"] = ICONS["repeat"] + '<path d="M11 10.6l1.4-.9v4.8"/>'
 ICONS["settings"] = _gear()
 ICONS["sun"] = _sun()
 ICONS["moon"] = '<path d="M20 14.2A8.2 8.2 0 1 1 9.8 4a6.6 6.6 0 0 0 10.2 10.2z"/>'
@@ -70,6 +89,18 @@ ICON_ROLE = Qt.ItemDataRole.UserRole + 21
 PAGE_ROLE = Qt.ItemDataRole.UserRole + 22
 
 _cache: dict[tuple[str, str, int, float], QPixmap] = {}
+_renderers: dict[tuple[str, str], QSvgRenderer] = {}
+
+
+def _renderer(name: str, colour: str) -> QSvgRenderer:
+    key = (name, colour)
+    if key not in _renderers:
+        svg = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" '
+               f'stroke="{colour}" stroke-width="1.8" stroke-linecap="round" '
+               f'stroke-linejoin="round">'
+               f'{ICONS[name].replace("currentColor", colour)}</svg>')
+        _renderers[key] = QSvgRenderer(QByteArray(svg.encode()))
+    return _renderers[key]
 
 
 def icon(name: str, colour: str, size: int) -> QPixmap:
@@ -78,18 +109,25 @@ def icon(name: str, colour: str, size: int) -> QPixmap:
     dpr = screen.devicePixelRatio() if screen is not None else 1.0
     key = (name, colour, size, dpr)
     if key not in _cache:
-        svg = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" '
-               f'stroke="{colour}" stroke-width="1.8" stroke-linecap="round" '
-               f'stroke-linejoin="round">{ICONS[name]}</svg>')
         px = max(1, round(size * dpr))
         pix = QPixmap(px, px)
         pix.fill(Qt.GlobalColor.transparent)
         painter = QPainter(pix)
-        QSvgRenderer(QByteArray(svg.encode())).render(painter, QRectF(0, 0, px, px))
+        _renderer(name, colour).render(painter, QRectF(0, 0, px, px))
         painter.end()
         pix.setDevicePixelRatio(dpr)
         _cache[key] = pix
     return _cache[key]
+
+
+def paint_icon(painter: QPainter, name: str, colour: str, rect: QRectF) -> None:
+    """Draw `name` straight onto `painter`, as lines rather than a picture.
+
+    A picture made ahead of time is stretched when the screen is scaled by a
+    fraction (115 %, 125 %), and thin diagonal lines come out as stairs. Drawn
+    here, the lines meet the screen's own pixels.
+    """
+    _renderer(name, colour).render(painter, rect)
 
 
 class NavDelegate(QStyledItemDelegate):
@@ -130,10 +168,10 @@ class NavDelegate(QStyledItemDelegate):
             painter.drawRoundedRect(card, 9, 9)
         colour = style.C["selection_text"] if selected else \
             style.C["text"] if hovered else style.C["muted"]
-        pix = icon(index.data(ICON_ROLE), style.C["accent"] if selected else colour, self.ICON)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         top = card.center().y() - self.ICON / 2
-        painter.drawPixmap(QRectF(card.left() + 12, top, self.ICON, self.ICON), pix,
-                           QRectF(pix.rect()))
+        paint_icon(painter, index.data(ICON_ROLE), style.C["accent"] if selected else colour,
+                   QRectF(card.left() + 12, top, self.ICON, self.ICON))
         font = QFont(option.font)
         font.setBold(selected)
         painter.setFont(font)

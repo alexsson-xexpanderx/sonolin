@@ -277,10 +277,10 @@ def test_play_and_pause_answer_the_press_at_once(app, monkeypatch):
     w, jobs = _window_with_jobs(monkeypatch)
     try:
         w._toggle_play()
-        assert w.play_btn.text() == "⏸" and w._states["u1"] == "TRANSITIONING"
+        assert w.play_btn.icon_name == "pause" and w._states["u1"] == "TRANSITIONING"
         w.now._playing = True
         w._toggle_play()
-        assert w.play_btn.text() == "▶" and not w.now._playing
+        assert w.play_btn.icon_name == "play" and not w.now._playing
         assert len(jobs) == 2  # play, then pause, still sent to the speaker
     finally:
         w.mpris.unregister()
@@ -303,5 +303,24 @@ def test_the_link_page_plays_what_it_is_given(app, monkeypatch):
         assert len(jobs) == 1
         jobs[0]()  # what the worker thread would run
         assert played == ["https://example.com/s/1.mp3"]
+    finally:
+        w.mpris.unregister()
+
+
+def test_the_bars_have_room_without_maximising(app, monkeypatch):
+    from PyQt6.QtTest import QTest
+
+    from sonolin.gui.visualizer import MIN_WIDTH
+
+    w, _jobs = _window_with_jobs(monkeypatch)
+    try:
+        w.show()  # the window's own starting size, not maximised
+        w.now.set_track({"title": "Song", "artist": "Artist", "album": "Album",
+                         "duration": "0:03:00", "position": "0:01:00"}, "PLAYING")
+        w.now.set_details([("From", "Your Library"), ("Queue", "Song 3 of 12"),
+                           ("Year", "2019"), ("Genre", "Electronic"), ("Format", "FLAC")])
+        QTest.qWait(50)
+        v = w.now.visualizer
+        assert v.height() >= 60 and v.width() >= MIN_WIDTH, (v.width(), v.height())
     finally:
         w.mpris.unregister()

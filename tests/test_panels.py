@@ -250,3 +250,85 @@ def test_library_columns_sort_and_play_in_the_order_shown(app):
 
     lib.tracks.sortByColumn(0, Qt.SortOrder.AscendingOrder)  # "#" restores the album order
     assert [lib.tracks.item(r, 1).text() for r in range(3)] == ["Long", "Short", "Mid"]
+
+
+def test_now_playing_details_sit_beside_the_title(app):
+    from sonolin.gui.panels import NowPlaying
+
+    now = NowPlaying()
+    now.set_details([("From", "Your Library"), ("Year", ""), ("Format", "FLAC · 44.1 kHz")])
+    texts = [now._detail_grid.itemAt(i).widget().text() for i in range(now._detail_grid.count())]
+    assert texts == ["From", "Your Library", "Format", "FLAC · 44.1 kHz"]  # empty rows left out
+    assert not now.details.isHidden()
+    now.set_compact(True)
+    assert now.details.isHidden()
+    now.set_compact(False)
+    now.set_details([])
+    assert now.details.isHidden()
+
+
+def test_the_cover_fills_the_card_but_never_holds_it_open(app):
+    from sonolin.gui.panels import NowPlaying
+
+    now = NowPlaying()
+    now.resize(1200, 340); now.show(); app.processEvents()
+    assert now.art.width() == now.art.height() == now.ART_MAX  # 340 tall, less margins
+    now.resize(1200, 200); app.processEvents()
+    assert now.art.width() == now.art.height() < 170
+    assert now.minimumSizeHint().height() < 200  # the divider can still be dragged up
+    now.hide()
+
+
+def test_the_queue_says_which_song_of_how_many(app):
+    q = QueueTab(); q.load(_items("A", "B", "C"))
+    assert q.playing_place() is None
+    q.set_playing(2, _uri("B"), "PLAYING")
+    assert q.playing_place() == (2, 3)
+    q.set_playing(1, "x-rincon-stream:RINCON_1", "PLAYING")  # not the queue
+    assert q.playing_place() is None
+
+
+def test_the_bars_move_while_playing_and_rest_when_paused(app):
+    from sonolin.gui.visualizer import Visualizer
+    from sonolin.spectrum import BANDS
+
+    v = Visualizer(); v.resize(600, 80); v.show()
+    v.sync(10.0, True)
+    assert v._timer.isActive()
+    for _ in range(40):
+        v.step()
+    # Nothing measured (Spotify, radio): drifting dots, not bars pretending to follow it.
+    assert v.shown > 0.9 and max(v.levels) == 0
+
+    class Steady:
+        def at(self, seconds):
+            return [1.0 if i == 5 else 0.0 for i in range(BANDS)]
+    v.set_spectrum(Steady())
+    for _ in range(80):
+        v.step()
+    assert v.levels[5] > 0.95 and max(v.levels[6:]) < 0.05  # follows the song
+    assert v.shown < 0.01  # and the dots have faded away
+
+    v.sync(12.0, False)
+    for _ in range(60):
+        v.step()
+    assert v.levels == [0.0] * BANDS and not v._timer.isActive()  # idle costs nothing
+
+    v.sync(12.0, True)
+    v.hide()
+    assert not v._timer.isActive()
+
+
+def test_the_bars_show_only_with_a_song_and_room_for_them(app):
+    from sonolin.gui.panels import NowPlaying
+
+    now = NowPlaying(); now.resize(1200, 300); now.show()
+    assert now.visualizer.isHidden()
+    now.set_track({"title": "Song", "duration": "0:03:00", "position": "0:01:00"}, "PLAYING")
+    assert now.visualizer.isVisible() and now.visualizer.playing
+    now.set_compact(True)
+    assert now.visualizer.isHidden()
+    now.set_compact(False)
+    now.set_asleep("Kitchen")
+    assert now.visualizer.isHidden()
+    now.hide()

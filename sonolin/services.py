@@ -252,6 +252,15 @@ class Services:
 
     # -- catalogue ---------------------------------------------------------
 
+    def name_for(self, service_id: int) -> str:
+        """A service's name from its number, e.g. 9 → "Spotify". Blocks once,
+        on first use, to fetch the list from a speaker; call it off the GUI thread."""
+        try:
+            return next((s.name for s in self.catalogue() if s.service_id == service_id), "")
+        except Exception:
+            log.debug("could not read the service list", exc_info=True)
+            return ""
+
     def catalogue(self) -> list[ServiceInfo]:
         """Every service the household can use. Fetched once per session: the
         list comes from the speaker and does not change while the app runs."""

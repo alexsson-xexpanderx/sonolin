@@ -32,7 +32,8 @@ from PyQt6.QtWidgets import (
 )
 
 from .. import links
-from ..controller import Controller
+from ..controller import Controller, describe_format, source_of
+from ..spectrum import analyse as analyse_spectrum
 from ..artwork import fetch_art
 from ..speaker import Speaker
 from ..tags import Tags
@@ -45,7 +46,7 @@ from .nav import NavList
 from .nav import icon as nav_icon
 from .panels import (
     AlarmsTab, AnnouncePanel, DevicePanel, FavouritesTab, JumpSlider, LibraryTab, LinkDialog,
-    LinkPanel, NowPlaying, QueueTab, SoundPanel, StreamPanel,
+    LinkPanel, NowPlaying, QueueTab, RoundButton, SoundPanel, StreamPanel,
 )
 
 log = logging.getLogger(__name__)
@@ -157,6 +158,8 @@ class MainWindow(QMainWindow):
         self._next_wake_check = 0.0
         self._states: dict[str, str] = {}
         self._groups: dict[str, str] = {}
+        self._spectra: dict[str, object] = {}   # Library path -> measured bars
+        self._spectrum_path = ""
 
         self.setWindowTitle("Sonolin")
         self.resize(1260, 820)
@@ -235,19 +238,18 @@ class MainWindow(QMainWindow):
 
         transport = QWidget(); transport.setObjectName("transport")
         tl = QHBoxLayout(transport); tl.setContentsMargins(4, 10, 4, 4); tl.setSpacing(10)
-        prev = QPushButton("⏮"); prev.setToolTip("Previous")
+        prev = RoundButton("previous", "Previous")
         prev.clicked.connect(lambda: self._call("previous"))
-        self.play_btn = QPushButton("▶"); self.play_btn.setObjectName("playButton")
-        self.play_btn.setToolTip("Play / pause")
+        self.play_btn = RoundButton("play", "Play / pause", size=52, primary=True)
         self.play_btn.clicked.connect(self._toggle_play)
-        stop = QPushButton("⏹"); stop.setToolTip("Stop")
+        stop = RoundButton("stop", "Stop")
         stop.clicked.connect(lambda: self._call("stop"))
-        nxt = QPushButton("⏭"); nxt.setToolTip("Next")
+        nxt = RoundButton("next", "Next")
         nxt.clicked.connect(lambda: self._call("next"))
-        self.shuffle_btn = QPushButton("⤮"); self.shuffle_btn.setToolTip("Shuffle")
+        self.shuffle_btn = RoundButton("shuffle", "Shuffle")
         self.shuffle_btn.setCheckable(True)
         self.shuffle_btn.clicked.connect(self._toggle_shuffle)
-        self.repeat_btn = QPushButton("↻"); self.repeat_btn.setToolTip("Repeat: off")
+        self.repeat_btn = RoundButton("repeat", "Repeat: off")
         self.repeat_btn.setCheckable(True)
         self.repeat_btn.clicked.connect(self._cycle_repeat)
         for w in (self.shuffle_btn, prev, self.play_btn, stop, nxt, self.repeat_btn):
@@ -710,6 +712,12 @@ class MainWindow(QMainWindow):
                 }
                 if with_sleep:
                     data["sleep"] = sp.soco.get_sleep_timer()
+                uri = data["track"].get("uri") or ""
+                data["local"] = self.c.local_track(uri)
+                # Naming a service fetches the service list once, so it is done
+                # here, off the GUI thread.
+                data["source"] = "Your Library" if data["local"] else \
+                    source_of(uri, self.services.name_for)
                 was_asleep = not sp.awake
                 sp.awake = True
                 data["woke"] = was_asleep
@@ -741,7 +749,7 @@ class MainWindow(QMainWindow):
             self.now.set_asleep(sp.name)
             self.mpris.update(state=None, title=f"{sp.name} is asleep", has_speaker=False)
             self.queue.set_playing(0, "", "")
-            self.play_btn.setText("▶")
+            self.play_btn.set_icon("play")
             self._next_wake_check = time.monotonic() + ASLEEP_RETRY_S
             self._refresh_item()
             return
@@ -757,9 +765,10 @@ class MainWindow(QMainWindow):
         except ValueError:
             position = 0
         self.queue.set_playing(position, info.get("uri") or "", state)
-        source = "desktop" if "/stream/live." in (info.get("uri") or "") else ""
-        self.now.set_track(info, state, source)
-        self.play_btn.setText("⏸" if state in ("PLAYING", "TRANSITIONING") else "▶")
+        self.now.set_track(info, state)
+        self.now.set_details(self._details(data))
+        self._show_spectrum(data.get("local"))
+        self.play_btn.set_icon("pause" if state in ("PLAYING", "TRANSITIONING") else "play")
         # A poll that set off before the user moved the slider brings the old
         # volume back; leave the slider alone until the speaker has caught up.
         if not self.volume.isSliderDown() and \
@@ -795,6 +804,40 @@ class MainWindow(QMainWindow):
             self.now.set_art(None)
         self._refresh_item()
 
+    #: Measured songs kept, so going back and forth in the queue is instant.
+    SPECTRA_KEPT = 8
+
+    def _show_spectrum(self, track: Tags | None) -> None:
+        """Measure a Library song once, in the background. Anything else has
+        no sound to measure, and the bars move in their made-up way."""
+        path = str(track.path) if track is not None else ""
+        if path == self._spectrum_path:
+            return
+        self._spectrum_path = path
+        self.now.visualizer.set_spectrum(self._spectra.get(path))
+        if not path or path in self._spectra:
+            return
+
+        def done(spectrum, path=path) -> None:
+            self._spectra[path] = spectrum
+            while len(self._spectra) > self.SPECTRA_KEPT:
+                self._spectra.pop(next(iter(self._spectra)))
+            if self._spectrum_path == path:
+                self.now.visualizer.set_spectrum(spectrum)
+
+        workers.run(analyse_spectrum, track.path, on_done=done,
+                    on_error=lambda m: log.debug("could not measure %s: %s", path, m))
+
+    def _details(self, data: dict) -> list[tuple[str, str]]:
+        """The rows beside the title: where the song is from, and file facts."""
+        rows = [("From", data.get("source", ""))]
+        if place := self.queue.playing_place():
+            rows.append(("Queue", f"Song {place[0]} of {place[1]}"))
+        if (track := data.get("local")) is not None:
+            rows += [("Year", track.year), ("Genre", track.genre),
+                     ("Format", describe_format(track))]
+        return rows
+
     @staticmethod
     def _fetch_art(url: str, speaker_ip: str, media_url: str = "") -> bytes | None:
         try:
@@ -813,7 +856,7 @@ class MainWindow(QMainWindow):
             # Answer the press at once rather than after the speaker confirms;
             # the next poll puts it right if the speaker refused.
             self._states[sp.uid] = "PAUSED_PLAYBACK" if pausing else "TRANSITIONING"
-            self.play_btn.setText("▶" if pausing else "⏸")
+            self.play_btn.set_icon("play" if pausing else "pause")
             if pausing:
                 self.now.stop_moving()
 
@@ -829,7 +872,7 @@ class MainWindow(QMainWindow):
         self._play_mode = (shuffle, repeat)
         self.shuffle_btn.setChecked(shuffle)
         self.repeat_btn.setChecked(bool(repeat))
-        self.repeat_btn.setText("↻¹" if repeat == "ONE" else "↻")
+        self.repeat_btn.set_icon("repeat_one" if repeat == "ONE" else "repeat")
         self.repeat_btn.setToolTip(
             {False: "Repeat: off", True: "Repeat: all", "ONE": "Repeat: this track"}[repeat])
 
