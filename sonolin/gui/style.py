@@ -7,6 +7,10 @@ below. Colours live in one table so the palette and the sheet cannot drift.
 
 from __future__ import annotations
 
+import os
+import re
+from pathlib import Path
+
 from PyQt6.QtGui import QColor, QPalette
 from PyQt6.QtWidgets import QApplication
 
@@ -17,8 +21,33 @@ from .themes import DARK
 C: dict[str, str] = dict(DARK)
 
 
+def _chevron(direction: str, colour: str) -> str:
+    """A small arrow for the spin boxes and drop-down lists, as a file path.
+
+    Styling those boxes' borders makes Qt stop drawing their arrows (spin box
+    buttons turn into empty squares), so the arrows are supplied here. Style
+    sheets take images only from files, so each colour is written once to
+    the cache; without it the boxes still work, just without arrows.
+    """
+    base = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "sonolin" / "style"
+    path = base / f"chevron-{direction}-{re.sub('[^0-9A-Za-z]', '', colour)}.svg"
+    if not path.exists():
+        shape = "M2 7l4-4 4 4" if direction == "up" else "M2 3l4 4 4-4"
+        try:
+            base.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 12 10">'
+                f'<path d="{shape}" fill="none" stroke="{colour}" stroke-width="1.7" '
+                'stroke-linecap="round" stroke-linejoin="round"/></svg>')
+        except OSError:
+            return ""
+    return path.as_posix()
+
+
 def sheet() -> str:
     """The stylesheet for the colours currently in `C`."""
+    up, down = _chevron("up", C["muted"]), _chevron("down", C["muted"])
+    up_off, down_off = _chevron("up", C["faint"]), _chevron("down", C["faint"])
     return f"""
 * {{
     font-size: 10.5pt;
@@ -200,7 +229,54 @@ QLineEdit:focus, QTextEdit:focus, QSpinBox:focus, QTimeEdit:focus, QComboBox:foc
 }}
 QComboBox::drop-down {{
     border: none;
-    width: 22px;
+    width: 26px;
+}}
+QComboBox::down-arrow {{
+    image: url("{down}");
+    width: 10px; height: 8px;
+}}
+QSpinBox, QTimeEdit {{
+    padding-right: 30px;
+}}
+QSpinBox::up-button, QSpinBox::down-button, QTimeEdit::up-button, QTimeEdit::down-button {{
+    subcontrol-origin: border;
+    width: 26px;
+    border: none;
+    border-left: 1px solid {C['border']};
+    background: transparent;
+}}
+QSpinBox::up-button, QTimeEdit::up-button {{
+    subcontrol-position: top right;
+    border-top-right-radius: 8px;
+}}
+QSpinBox::down-button, QTimeEdit::down-button {{
+    subcontrol-position: bottom right;
+    border-top: 1px solid {C['border']};
+    border-bottom-right-radius: 8px;
+}}
+QSpinBox::up-button:hover, QSpinBox::down-button:hover,
+QTimeEdit::up-button:hover, QTimeEdit::down-button:hover {{
+    background: {C['hover']};
+}}
+QSpinBox::up-button:pressed, QSpinBox::down-button:pressed,
+QTimeEdit::up-button:pressed, QTimeEdit::down-button:pressed {{
+    background: {C['accent_lo']};
+}}
+QSpinBox::up-arrow, QTimeEdit::up-arrow {{
+    image: url("{up}");
+    width: 10px; height: 8px;
+}}
+QSpinBox::down-arrow, QTimeEdit::down-arrow {{
+    image: url("{down}");
+    width: 10px; height: 8px;
+}}
+QSpinBox::up-arrow:off, QSpinBox::up-arrow:disabled,
+QTimeEdit::up-arrow:off, QTimeEdit::up-arrow:disabled {{
+    image: url("{up_off}");
+}}
+QSpinBox::down-arrow:off, QSpinBox::down-arrow:disabled,
+QTimeEdit::down-arrow:off, QTimeEdit::down-arrow:disabled {{
+    image: url("{down_off}");
 }}
 QComboBox QAbstractItemView {{
     background: {C['raised']};

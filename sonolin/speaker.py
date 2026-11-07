@@ -26,7 +26,7 @@ import soco
 import soco.config
 from soco.snapshot import Snapshot
 
-from .ws import SonosWebSocket
+from .ws import SonosWebSocket, SonosWebSocketError
 
 log = logging.getLogger(__name__)
 
@@ -132,7 +132,7 @@ class Speaker:
     @property
     def ws(self) -> SonosWebSocket:
         if self._ws is None:
-            self._ws = SonosWebSocket(self.ip)
+            self._ws = SonosWebSocket(self.ip, uid=self._uid)
             _Loop.submit(self._ws.learn_household())
         return self._ws
 
@@ -203,6 +203,16 @@ class Speaker:
         if volume is not None:
             body["volume"] = int(volume)
         return self.ws_command("audioClip", "loadAudioClip", **body)
+
+    def cancel_announcement(self, clip_id: str) -> bool:
+        """Stop a clip from `announce` early. False if it had already finished."""
+        try:
+            self.ws_command("audioClip", "cancelAudioClip", id=clip_id)
+        except SonosWebSocketError as exc:
+            if exc.code == "ERROR_INVALID_OBJECT_ID":
+                return False  # the speaker forgets a clip once it has played
+            raise
+        return True
 
     def duck(self) -> dict:
         """Drop the group to a low volume without touching the volume setting."""

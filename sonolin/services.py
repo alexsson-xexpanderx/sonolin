@@ -230,6 +230,8 @@ class Services:
         self._store = None
         self._open: dict[tuple[str, str], object] = {}
         self._pending: dict[str, object] = {}
+        #: The latest Play; a list still being queued for an earlier one stops.
+        self._play_turn: object = None
 
     @property
     def store(self):
@@ -461,17 +463,52 @@ class Services:
             return
         queueable = [i for i in items if describe(i).queueable]
         soco = speaker.soco
+        self._play_turn = turn = object()
         soco.clear_queue()
         if len(queueable) > 1 and all(describe(i).kind == "track" for i in queueable):
-            # One request per sixteen songs rather than one per song.
-            soco.add_multiple_to_queue(queueable)
-            soco.play_from_queue(queueable.index(target))
+            # The chosen song goes in alone and starts at once. Queueing a
+            # 200-song playlist first takes a dozen requests, and the music
+            # used to wait for all of them. The rest is filled in around it
+            # while it plays: the songs after it, then those before it.
+            at = queueable.index(target)
+            soco.add_to_queue(target)
+            soco.play_from_queue(0)
+            still_wanted = lambda: self._play_turn is turn  # noqa: E731
+            if self._add_in_batches(soco, queueable[at + 1:], 0, still_wanted):
+                self._add_in_batches(soco, queueable[:at], 1, still_wanted)
         else:
             # A container (album, playlist, radio) expands to its songs on the
             # speaker; play it from the top.
             for item in queueable:
                 soco.add_to_queue(item)
             soco.play_from_queue(0)
+
+    @staticmethod
+    def _add_in_batches(soco, items: list, position: int, still_wanted) -> bool:
+        """Queue `items` sixteen at a time, at 1-based `position` (0 = the end).
+
+        SoCo's `add_multiple_to_queue` can only append; songs that come before
+        the one already playing have to be inserted ahead of it. Stops early,
+        returning False, once a newer Play has taken over the queue.
+        """
+        from soco.data_structures import to_didl_string
+
+        for index in range(0, len(items), 16):
+            if not still_wanted():
+                return False
+            chunk = items[index:index + 16]
+            soco.avTransport.AddMultipleURIsToQueue([
+                ("InstanceID", 0),
+                ("UpdateID", 0),
+                ("NumberOfURIs", len(chunk)),
+                ("EnqueuedURIs", " ".join(item.resources[0].uri for item in chunk)),
+                ("EnqueuedURIsMetaData", " ".join(to_didl_string(item) for item in chunk)),
+                ("ContainerURI", ""),
+                ("ContainerMetaData", ""),
+                ("DesiredFirstTrackNumberEnqueued", position + index if position else 0),
+                ("EnqueueAsNext", 0),
+            ])
+        return True
 
     def play_items(self, name: str, speaker, items: list) -> None:
         """Play a selection from its first item, continuing through the rest."""

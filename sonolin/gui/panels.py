@@ -563,6 +563,7 @@ class AnnouncePanel(QWidget):
     speak = pyqtSignal(str, str, int, object)
     chime = pyqtSignal(object)
     notify = pyqtSignal(str, object)
+    stop = pyqtSignal()
 
     def __init__(self, voices: list[tuple[str, str]]) -> None:
         super().__init__()
@@ -599,8 +600,14 @@ class AnnouncePanel(QWidget):
         form.addRow("Words / min", self.wpm)
         form.addRow(self.use_vol, self.vol)
 
+        self.stop_btn = QPushButton("Stop")
+        self.stop_btn.setToolTip("Stop the announcement now")
+        self.stop_btn.setEnabled(False)  # until something is playing
+        self.stop_btn.clicked.connect(self.stop.emit)
+
         buttons = QHBoxLayout()
-        buttons.addWidget(say_btn); buttons.addWidget(chime_btn); buttons.addStretch(1)
+        buttons.addWidget(say_btn); buttons.addWidget(chime_btn)
+        buttons.addWidget(self.stop_btn); buttons.addStretch(1)
 
         url_row = QHBoxLayout()
         url_row.addWidget(self.url, 1); url_row.addWidget(url_btn)
@@ -622,6 +629,9 @@ class AnnouncePanel(QWidget):
 
     def _volume(self) -> int | None:
         return self.vol.value() if self.use_vol.isChecked() else None
+
+    def set_stoppable(self, on: bool) -> None:
+        self.stop_btn.setEnabled(on)
 
     def _say(self) -> None:
         text = self.text.toPlainText().strip()

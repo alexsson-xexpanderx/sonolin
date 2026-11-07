@@ -55,6 +55,9 @@ class Config:
     #: for that side, so a custom dark theme survives a trip to light mode.
     theme_dark: str = "Dark"
     theme_light: str = "Light"
+    #: Whether the user has been told once that closing the window keeps
+    #: Sonolin running in the tray.
+    tray_hint_shown: bool = False
 
     @classmethod
     def load(cls, path: Path | None = None) -> Config:

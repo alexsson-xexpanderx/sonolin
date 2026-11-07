@@ -257,16 +257,48 @@ def _recording_soco():
         add_to_queue=lambda item: calls.append(("add", item.title)) or 1,
         play_from_queue=lambda i: calls.append(("play_from", i)),
         play_uri=lambda uri, meta, title, start: calls.append(("play_uri", title)),
+        avTransport=SimpleNamespace(AddMultipleURIsToQueue=lambda args: calls.append((
+            "add_batch", dict(args)["DesiredFirstTrackNumberEnqueued"],
+            dict(args)["EnqueuedURIs"].split()))),
     )
     return soco, calls
 
 
-def test_a_song_plays_on_down_its_album():
+def _album(count):
+    songs = [_ms_item(f"t{n}", item_type="track") for n in range(1, count + 1)]
+    for song in songs:
+        song.resources = [SimpleNamespace(uri=song.title)]
+    return songs
+
+
+def test_a_song_plays_at_once_and_its_album_fills_in_around_it(monkeypatch):
+    monkeypatch.setattr("soco.data_structures.to_didl_string", lambda item: "")
     soco, calls = _recording_soco()
-    album = [_ms_item(f"t{n}", item_type="track") for n in range(1, 11)]
-    Services().play_context("Spotify", SimpleNamespace(soco=soco), album, start=3)
-    assert calls == [("clear",), ("add_many", [f"t{n}" for n in range(1, 11)]),
-                     ("play_from", 3)]
+    Services().play_context("Spotify", SimpleNamespace(soco=soco), _album(40), start=20)
+    # The chosen song alone, playing, before anything else is queued.
+    assert calls[:3] == [("clear",), ("add", "t21"), ("play_from", 0)]
+    # Then the 19 after it, appended in sixteens; then the 20 before it,
+    # inserted ahead of it from the top, so the queue ends in album order.
+    assert calls[3:] == [
+        ("add_batch", 0, [f"t{n}" for n in range(22, 38)]),
+        ("add_batch", 0, [f"t{n}" for n in range(38, 41)]),
+        ("add_batch", 1, [f"t{n}" for n in range(1, 17)]),
+        ("add_batch", 17, [f"t{n}" for n in range(17, 21)]),
+    ]
+
+
+def test_a_newer_play_stops_an_older_one_filling_the_queue(monkeypatch):
+    monkeypatch.setattr("soco.data_structures.to_didl_string", lambda item: "")
+    soco, calls = _recording_soco()
+    svc = Services()
+    first_batch = soco.avTransport.AddMultipleURIsToQueue
+
+    def batch_then_new_play(args):
+        first_batch(args)
+        svc._play_turn = object()  # the user picked another song meanwhile
+    soco.avTransport.AddMultipleURIsToQueue = batch_then_new_play
+    svc.play_context("Spotify", SimpleNamespace(soco=soco), _album(60), start=0)
+    assert [c[0] for c in calls].count("add_batch") == 1
 
 
 def test_an_album_plays_from_the_top():

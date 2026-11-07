@@ -17,27 +17,29 @@ polls the play position is advanced locally.
 from __future__ import annotations
 
 import logging
+import os
 import re
 import sys
 import time
 from pathlib import Path
 
-from PyQt6.QtCore import QRectF, QSize, Qt, QTimer, QUrl, pyqtSignal
+from PyQt6.QtCore import QRectF, QSize, Qt, QThreadPool, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import QAction, QColor, QFont, QIcon, QKeySequence, QPainter, QShortcut
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QFrame, QHBoxLayout, QInputDialog, QLabel, QListWidget,
     QListWidgetItem, QMainWindow, QMenu, QMessageBox, QProgressBar, QPushButton,
     QSplitter, QStackedWidget, QStatusBar, QStyle,
-    QStyledItemDelegate, QToolButton, QVBoxLayout, QWidget,
+    QStyledItemDelegate, QSystemTrayIcon, QToolButton, QVBoxLayout, QWidget,
 )
 
 from .. import links
 from ..controller import Controller, describe_format, source_of
 from ..spectrum import analyse as analyse_spectrum
+from ..ws import read_certificate
 from ..artwork import fetch_art
 from ..speaker import Speaker
 from ..tags import Tags
-from . import style, themes, workers
+from . import instance, style, themes, workers
 from .mpris import Mpris
 from .mpris import connect as connect_mpris
 from ..services import Services, service_track
@@ -195,7 +197,9 @@ class MainWindow(QMainWindow):
                 "open": lambda uri: self._call("play_uri", uri),
             })
             self.mpris.raise_requested.connect(self._bring_to_front)
-            self.mpris.quit_requested.connect(self.close)
+            self.mpris.quit_requested.connect(self.quit_app)
+        self._quitting = False
+        self.tray = self._build_tray()
 
         QTimer.singleShot(100, self._discover)
         QTimer.singleShot(200, self._scan)
@@ -346,6 +350,10 @@ class MainWindow(QMainWindow):
         self.announce.speak.connect(self._speak)
         self.announce.chime.connect(self._chime)
         self.announce.notify.connect(self._notify)
+        self.announce.stop.connect(self._stop_announcements)
+        self._clips: list[tuple[Speaker, str]] = []   # announcements that may be playing
+        self._clips_over = QTimer(self, singleShot=True)
+        self._clips_over.timeout.connect(self._clips_finished)
 
         self.stream = StreamPanel()
         self.stream.fmt.setCurrentText(self.cfg.stream_format)
@@ -667,6 +675,45 @@ class MainWindow(QMainWindow):
         self.raise_()
         self.activateWindow()
 
+    # -- tray ----------------------------------------------------------------
+
+    def _build_tray(self) -> QSystemTrayIcon | None:
+        """An icon by the clock, so closing the window does not stop Sonolin.
+
+        Without a tray to return from (some desktops have none), closing the
+        window quits as before.
+        """
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            return None
+        tray = QSystemTrayIcon(QIcon(str(Path(__file__).with_name("sonolin.svg"))), self)
+        tray.setToolTip("Sonolin")
+        menu = QMenu(self)
+        menu.addAction("Show Sonolin", self._bring_to_front)
+        menu.addSeparator()
+        menu.addAction("Play / pause", self._toggle_play)
+        menu.addAction("Next", lambda: self._call("next"))
+        menu.addAction("Previous", lambda: self._call("previous"))
+        menu.addSeparator()
+        menu.addAction("Quit Sonolin", self.quit_app)
+        tray.setContextMenu(menu)
+        tray.activated.connect(self._tray_clicked)
+        tray.show()
+        # Hiding the window must not end the program; quitting is explicit.
+        QApplication.instance().setQuitOnLastWindowClosed(False)
+        return tray
+
+    def _tray_clicked(self, reason: QSystemTrayIcon.ActivationReason) -> None:
+        if reason != QSystemTrayIcon.ActivationReason.Trigger:
+            return  # the menu handles the right button
+        if self.isVisible() and not self.isMinimized():
+            self.hide()
+        else:
+            self._bring_to_front()
+
+    def _show_in_tray(self, title: str, artist: str) -> None:
+        if self.tray is not None:
+            self.tray.setToolTip(" · ".join(t for t in ("Sonolin", title, artist) if t))
+
     def _mpris_volume(self, fraction: float) -> None:
         value = round(fraction * 100)
         self.volume.setValue(value)  # sends it, like any other change
@@ -766,6 +813,7 @@ class MainWindow(QMainWindow):
             position = 0
         self.queue.set_playing(position, info.get("uri") or "", state)
         self.now.set_track(info, state)
+        self._show_in_tray(self.now.title.text(), info.get("artist") or "")
         self.now.set_details(self._details(data))
         self._show_spectrum(data.get("local"))
         self.play_btn.set_icon("pause" if state in ("PLAYING", "TRANSITIONING") else "play")
@@ -984,10 +1032,43 @@ class MainWindow(QMainWindow):
             return None
         return lambda: self.services.cover_for(sp, url)
 
+    #: Quiet time after a queue change before the queue is fetched again.
+    QUEUE_SETTLE_MS = 300
+
     def _refresh_queue(self) -> None:
+        """Fetch the queue once things settle, not once per change.
+
+        Queueing a playlist reports a change for every sixteen songs, and each
+        fetch reads the whole queue back from the speaker, which is then busy
+        answering instead of adding songs. A burst of reports is one fetch,
+        and only one fetch is ever out at a time.
+        """
+        if not hasattr(self, "_queue_settle"):
+            self._queue_settle = QTimer(self, singleShot=True, interval=self.QUEUE_SETTLE_MS)
+            self._queue_settle.timeout.connect(self._fetch_queue)
+            self._queue_loading = self._queue_again = False
+        self._queue_settle.start()
+
+    def _fetch_queue(self) -> None:
+        if self._queue_loading:
+            self._queue_again = True
+            return
         sp = self.current
         if sp is None or not sp.awake:
             return
+        self._queue_loading = True
+
+        def landed(result) -> None:
+            self._queue_loading = False
+            self.queue.load(*result)
+            if self._queue_again:
+                self._queue_again = False
+                self._fetch_queue()
+
+        def failed(message: str) -> None:
+            self._queue_loading = self._queue_again = False
+            self._error(message)
+
         def job():
             items = sp.soco.get_queue(max_items=1000)
             # Service tracks name their cover relative to the speaker
@@ -997,7 +1078,7 @@ class MainWindow(QMainWindow):
                     if getattr(i, "album_art_uri", None) else "" for i in items]
             return items, arts
 
-        workers.run(job, on_done=lambda r: self.queue.load(*r), on_error=self._error)
+        workers.run(job, on_done=landed, on_error=failed)
 
     def _clear_queue(self) -> None:
         if self.current is None:
@@ -1146,25 +1227,118 @@ class MainWindow(QMainWindow):
 
     # -- announcements -----------------------------------------------------
 
+    def _trusted_then(self, action) -> None:
+        """Run an announcement, first asking to trust the speaker if it is new.
+
+        Announcements go over a connection that checks the speaker's certificate,
+        so another device on the network cannot pose as it and receive them.
+        Which certificate is the right one is the user's call, made once.
+        """
+        sp = self.current
+        if sp is None:
+            self._status("Pick a speaker first.")
+            return
+        if self.c.is_trusted(sp):
+            action()
+            return
+        self._status(f"Reading {sp.name}'s ID…", busy=True)
+
+        def done(result) -> None:
+            self.busy.hide()
+            fingerprint, name = result
+            if sp is self.current and self._ask_trust(sp, fingerprint, name):
+                self.c.trust(sp, fingerprint)
+                action()
+            else:
+                self._status("Nothing sent.")
+
+        workers.run(read_certificate, sp.ip, on_done=done,
+                    on_error=lambda m: self._error(f"Could not read {sp.name}'s ID ({m})."))
+
+    def _ask_trust(self, sp: Speaker, fingerprint: str, name: str) -> bool:
+        # A Sonos certificate names the player's serial number, which is also
+        # part of its id; a match is a good sign, a mismatch a reason to stop.
+        matches = bool(name) and name.upper() in sp.uid.upper()
+        verdict = (f"Its ID matches {sp.name}'s serial number ({name})." if matches else
+                   f"Careful: its ID does not match {sp.name}'s serial number. Trust it "
+                   "only if you are sure no other device could be answering in its place.")
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question if matches else QMessageBox.Icon.Warning)
+        box.setWindowTitle("Trust this speaker?")
+        box.setText(f"Trust {sp.name} for announcements?")
+        box.setInformativeText(
+            "Sonolin checks a speaker's ID before sending it announcements, so another "
+            f"device on your network cannot pretend to be it.\n\n{verdict}\n\n"
+            "You are asked once; Sonolin remembers it even if the speaker's network "
+            "address changes.")
+        box.setDetailedText(f"Certificate fingerprint (SHA-256):\n{fingerprint}")
+        trust = box.addButton("Trust", QMessageBox.ButtonRole.AcceptRole)
+        cancel = box.addButton(QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(trust if matches else cancel)
+        box.exec()
+        return box.clickedButton() is trust
+
+    #: How long Stop stays available when a clip's length is unknown (a sound
+    #: from a web address), and for the speaker's own short chime.
+    CLIP_GUESS_S, CHIME_S = 120, 5
+
+    def _send_clip(self, fn, *args, ok: str, seconds: float = CLIP_GUESS_S, **kwargs) -> None:
+        """Send an announcement and keep its id, so Stop can cancel it."""
+        sp = self.current
+
+        def done(reply) -> None:
+            self.busy.hide()
+            self._status(ok)
+            self._update_server_label()
+            clip = reply.get("id") if isinstance(reply, dict) else None
+            if clip:
+                self._clips.append((sp, clip))
+                self.announce.set_stoppable(True)
+                # Stop goes grey a little after the clip should have ended.
+                length = reply.get("seconds") or seconds
+                self._clips_over.start(int((length + 3) * 1000))
+
+        workers.run(fn, *args, on_done=done, on_error=self._error, **kwargs)
+
+    def _stop_announcements(self) -> None:
+        clips, self._clips = self._clips, []
+        self._clips_finished()
+
+        def cancel_all() -> bool:
+            return any([sp.cancel_announcement(clip) for sp, clip in clips])
+
+        workers.run(cancel_all,
+                    on_done=lambda stopped: self._status(
+                        "Stopped." if stopped else "It had already finished."),
+                    on_error=self._error)
+
+    def _clips_finished(self) -> None:
+        self._clips_over.stop()
+        self._clips.clear()
+        self.announce.set_stoppable(False)
+
     def _speak(self, text: str, voice: str, wpm: int, volume: object) -> None:
         self.cfg.tts_voice = voice
         if volume is not None:
             self.cfg.announce_volume = int(volume)
-        self._status("Speaking…", busy=True)
-        self._run(self.c.say, self.current, text, voice=voice, wpm=wpm, volume=volume,
-                  ok="Announcement sent.", then=self._update_server_label)
+
+        def send() -> None:
+            self._status("Speaking…", busy=True)
+            self._send_clip(self.c.say, self.current, text, voice=voice, wpm=wpm,
+                            volume=volume, ok="Announcement sent.")
+        self._trusted_then(send)
 
     def _chime(self, volume: object) -> None:
-        sp = self.current
-        if sp is None:
-            return
-        self._run(sp.announce, clip_type="CHIME", volume=volume, ok="Chime sent.")
+        self._trusted_then(lambda: self._send_clip(
+            self.current.announce, clip_type="CHIME", volume=volume, ok="Chime sent.",
+            seconds=self.CHIME_S))
 
     def _notify(self, url: str, volume: object) -> None:
         if not url:
             self._status("Give a URL the speaker can reach.")
             return
-        self._run(self.c.notify, self.current, url, volume=volume, ok="Sound sent.")
+        self._trusted_then(lambda: self._send_clip(
+            self.c.notify, self.current, url, volume=volume, ok="Sound sent."))
 
     # -- desktop streaming -------------------------------------------------
 
@@ -1277,9 +1451,29 @@ class MainWindow(QMainWindow):
 
     # -- shutdown ----------------------------------------------------------
 
+    def quit_app(self) -> None:
+        """Really quit: the tray's Quit, the desktop's media widget, or closing
+        the window when there is no tray to keep running in."""
+        self._quitting = True
+        self.close()
+        QApplication.quit()
+
     def closeEvent(self, event) -> None:
+        if self.tray is not None and not self._quitting:
+            # Closing hides to the tray; media keys and the tray keep working.
+            event.ignore()
+            self.hide()
+            if not self.cfg.tray_hint_shown:
+                self.cfg.tray_hint_shown = True
+                self.tray.showMessage(
+                    "Sonolin is still running",
+                    "It stays here by the clock. Right-click the icon to quit.",
+                    QSystemTrayIcon.MessageIcon.Information, 6000)
+            return
         self.timer.stop()
         self.mpris.unregister()
+        if self.tray is not None:
+            self.tray.hide()
         try:
             self.c._save()
             self.c.close()
@@ -1295,12 +1489,23 @@ def main(argv: list[str] | None = None) -> int:
     app.setApplicationDisplayName("Sonolin")
     app.setDesktopFileName("sonolin")  # ties windows to sonolin.desktop on Wayland
     app.setWindowIcon(QIcon(str(Path(__file__).with_name("sonolin.svg"))))
+    if instance.hand_over():
+        return 0  # already running: that copy shows its window instead
     controller = Controller()
     saved = themes.find(controller.config.theme) or themes.builtin_themes()[0]
     style.apply(app, saved.colors)
     window = MainWindow(controller)
+    window.instance_server = instance.listen(window._bring_to_front)
     window.show()
-    return app.exec()
+    code = app.exec()
+    # Settings are saved by now. A job still waiting on a speaker (one asleep,
+    # or slow to answer at a new address) must not keep an invisible copy
+    # running, so the process ends here rather than waiting for it.
+    QThreadPool.globalInstance().clear()
+    QThreadPool.globalInstance().waitForDone(3000)
+    logging.shutdown()
+    sys.stdout.flush(); sys.stderr.flush()
+    os._exit(code)
 
 
 if __name__ == "__main__":

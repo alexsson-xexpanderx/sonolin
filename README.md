@@ -104,32 +104,36 @@ account or cloud is needed.
 
 ### Trusting a speaker for announcements
 
-Before using announcements or other WebSocket controls, explicitly trust the
-speaker's TLS certificate. Sonolin refuses connections without a matching pin;
-discovery and the public API key do not authenticate a speaker.
+Announcements go over a connection that checks the speaker's certificate, so
+another device on your network cannot pose as the speaker and receive them.
+Discovery and the public API key do not prove who a speaker is; only the
+certificate does.
 
-Obtain the certificate through a trusted connection to the intended speaker
-(for example, an isolated network containing only your computer and that speaker):
+The first time you send an announcement to a speaker, the app reads its
+certificate and asks whether to trust it. It shows whether the certificate names
+the speaker's own serial number (a Sonos certificate does), with the full
+SHA-256 fingerprint under "Show Details…". Sonolin remembers your answer by the
+speaker's id, so it still applies after your router gives the speaker a new
+address. Nothing is ever trusted without asking.
+
+From the command line, or to check a fingerprint yourself first, read it with:
 
 ```bash
-openssl s_client -connect 192.168.1.14:1443 </dev/null 2>/dev/null \
-  | openssl x509 -noout -fingerprint -sha256
+openssl s_client -connect <speaker-ip>:1443 </dev/null 2>/dev/null \
+  | openssl x509 -noout -fingerprint -sha256 -subject
 ```
 
-Close Sonolin, then add a `websocket_fingerprints` object to
-`$XDG_CONFIG_HOME/sonolin/config.json` (normally `~/.config/sonolin/config.json`),
-preserving other settings. Map the speaker's IP to the 64 hex digits printed
-after `=`, with or without colons:
+and, with Sonolin closed, add it to `$XDG_CONFIG_HOME/sonolin/config.json`
+(normally `~/.config/sonolin/config.json`) keyed by the speaker's id (or its IP,
+as older versions did), keeping the other settings:
 
 ```json
-"websocket_fingerprints": {"192.168.1.14": "<verified SHA-256 fingerprint>"}
+"websocket_fingerprints": {"RINCON_XXXXXXXXXXXX01400": "<SHA-256 fingerprint>"}
 ```
 
-Never enroll a certificate obtained only over a potentially intercepted network.
-Pins persist across restarts and are never learned or replaced automatically.
-If a speaker changes IP, update the mapping after verifying the device. If its
-certificate changes, verify the replacement through a trusted connection before
-updating the pin. Existing installations must enroll their speakers too.
+Be most careful on a network you do not control. If a speaker's certificate
+ever changes, Sonolin refuses it until you remove the old entry and trust the
+new one.
 
 ## Compared with noson-app
 

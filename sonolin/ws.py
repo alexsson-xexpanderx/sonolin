@@ -20,6 +20,8 @@ import hashlib
 import itertools
 import json
 import logging
+import socket
+import ssl
 from collections.abc import Awaitable, Callable
 from typing import Any
 from urllib.parse import urlsplit
@@ -64,6 +66,53 @@ class SonosWebSocketError(RuntimeError):
         self.reason = reason
 
 
+class NotTrusted(ConnectionError):
+    """No usable fingerprint is saved for this speaker. The app asks the user
+    whether to trust it; the CLI points at the README."""
+
+
+def pin_for(pins: object, uid: str, ip: str) -> object:
+    """The saved fingerprint for a speaker.
+
+    By the speaker's own id first, which survives the router giving it a new
+    address, then by address, as older settings saved it. Choosing the pin by
+    id is as safe as by address: whichever device answers must still present
+    the certificate the pin names.
+    """
+    if not isinstance(pins, dict):
+        return None
+    return (pins.get(uid) if uid else None) or pins.get(ip)
+
+
+def read_certificate(ip: str, timeout: float = 5.0) -> tuple[str, str]:
+    """(SHA-256 fingerprint as ``AA:BB:…``, the certificate's common name).
+
+    Read without checking it, only to show the user, who decides whether to
+    trust it; nothing is sent to the speaker beyond the TLS handshake.
+    """
+    context = ssl.create_default_context()
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    with socket.create_connection((ip, PORT), timeout=timeout) as raw, \
+            context.wrap_socket(raw, server_hostname=ip) as tls:
+        der = tls.getpeercert(binary_form=True)
+    fingerprint = ":".join(f"{b:02X}" for b in hashlib.sha256(der).digest())
+    return fingerprint, _common_name(der)
+
+
+def _common_name(der: bytes) -> str:
+    """The subject's common name, e.g. a Sonos player's serial number.
+
+    The issuer's name comes first in a certificate and the subject's after
+    it, so the last one is the subject's.
+    """
+    at = der.rfind(b"\x06\x03\x55\x04\x03")  # the object id for "common name"
+    if at < 0 or at + 7 > len(der) or der[at + 6] >= 0x80:
+        return ""
+    length = der[at + 6]
+    return der[at + 7:at + 7 + length].decode("utf-8", "replace")
+
+
 class SonosWebSocket:
     """One long-lived websocket to one player.
 
@@ -73,9 +122,11 @@ class SonosWebSocket:
     """
 
     def __init__(
-        self, ip: str, *, session: aiohttp.ClientSession | None = None, url: str | None = None
+        self, ip: str, *, uid: str = "", session: aiohttp.ClientSession | None = None,
+        url: str | None = None,
     ) -> None:
         self.ip = ip
+        self.uid = uid
         self.url = url or f"wss://{ip}:{PORT}/websocket/api"
         self.household_id: str | None = None
         self._session = session
@@ -93,15 +144,13 @@ class SonosWebSocket:
             return
         if urlsplit(self.url).scheme != "wss":
             raise ConnectionError("Speaker connections require wss:// (TLS)")
-        pins = Config.load().websocket_fingerprints
-        pin = pins.get(self.ip) if isinstance(pins, dict) else None
+        pin = pin_for(Config.load().websocket_fingerprints, self.uid, self.ip)
         try:
             fingerprint = aiohttp.Fingerprint(bytes.fromhex(pin.replace(":", "")))
         except (AttributeError, TypeError, ValueError) as exc:
-            raise ConnectionError(
-                f"Set a verified SHA-256 certificate fingerprint for {self.ip} in "
-                "config.json's websocket_fingerprints before using announcements "
-                "or other WebSocket controls. See README.md."
+            raise NotTrusted(
+                f"The speaker at {self.ip} is not trusted for announcements yet. "
+                "Trust it from Sonolin's Announce page, or see README.md."
             ) from exc
         if self._session is None:
             self._session = aiohttp.ClientSession()

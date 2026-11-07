@@ -12,9 +12,11 @@ and a different UI could be dropped on top without touching any of it.
 
 from __future__ import annotations
 
+import io
 import logging
 import re
 import threading
+import wave
 from collections.abc import Callable
 from pathlib import Path
 from urllib.parse import parse_qs
@@ -57,6 +59,15 @@ def source_of(uri: str, service_name: Callable[[int], str] = lambda sid: "") -> 
     if scheme in ("http", "https"):
         return "Web link"
     return "A music service" if sid else ""
+
+
+def wav_seconds(data: bytes) -> float:
+    """How long a WAV recording plays, or 0 if it cannot be read."""
+    try:
+        with wave.open(io.BytesIO(data)) as w:
+            return w.getnframes() / w.getframerate()
+    except (wave.Error, EOFError, ZeroDivisionError):
+        return 0.0
 
 
 def describe_format(track: Tags) -> str:
@@ -189,6 +200,21 @@ class Controller:
             self._tokens = {token_for(t.path): t for t in tracks}
             self._token_source = tracks
         return self._tokens.get(found.group(1))
+
+    def is_trusted(self, speaker: Speaker) -> bool:
+        """Whether announcements may be sent to `speaker`: a fingerprint is saved."""
+        from .ws import pin_for
+
+        return bool(pin_for(self.config.websocket_fingerprints, speaker.uid, speaker.ip))
+
+    def trust(self, speaker: Speaker, fingerprint: str) -> None:
+        """Remember `speaker`'s certificate, by its own id so a new address keeps it.
+
+        Only ever called after the user has seen the fingerprint and agreed.
+        """
+        self.config.websocket_fingerprints[speaker.uid or speaker.ip] = fingerprint
+        self._save()
+        speaker.close()  # the next announcement connects afresh with the pin
 
     def hide_tracks(self, tracks: list) -> None:
         self.library.hide(tracks)
@@ -444,7 +470,9 @@ class Controller:
         wav = _Loop.submit(tts.synthesise(text, voice=voice, wpm=wpm))
         url = server.add_clip(wav, "audio/wav", "wav")
         self.last_clip_url = url
-        return speaker.announce(url, volume=volume, name="Sonolin speech")
+        reply = speaker.announce(url, volume=volume, name="Sonolin speech")
+        # How long it speaks, so the app knows how long it can be stopped for.
+        return {**reply, "seconds": wav_seconds(wav)}
 
     def wait_clip_fetched(self, timeout: float = 20.0) -> bool:
         """Block until the speaker has fetched the most recent clip."""

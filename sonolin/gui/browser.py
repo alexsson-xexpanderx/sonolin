@@ -1455,6 +1455,8 @@ class Browser(QWidget):
     def play_from(self, entries: list[Entry], row: int) -> None:
         """Play `entries[row]` and carry on down the rest of the list."""
         sp = self.speaker()
+        if sp is not None:
+            self.status.emit(f"Starting {entries[row].title}…")  # answer the click at once
         self._run(self.services.play_context, self.name, sp, [e.item for e in entries], row,
                   ok=f"Playing {entries[row].title}.", then=self.played.emit)
 

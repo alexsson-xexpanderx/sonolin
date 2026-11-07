@@ -324,3 +324,168 @@ def test_the_bars_have_room_without_maximising(app, monkeypatch):
         assert v.height() >= 60 and v.width() >= MIN_WIDTH, (v.width(), v.height())
     finally:
         w.mpris.unregister()
+
+
+def test_an_announcement_asks_once_to_trust_a_new_speaker(app, monkeypatch):
+    from sonolin.gui import app as app_module
+
+    w, _jobs = _window_with_jobs(monkeypatch)
+    calls = []
+    monkeypatch.setattr(app_module.workers, "run",
+                        lambda fn, *a, on_done=None, **kw: calls.append((fn, a, on_done)))
+    monkeypatch.setattr(w.c, "_save", lambda: None)
+    w.current.uid, w.current.ip = "RINCON_48A6B8EEA8C001400", "10.0.0.9"
+    w.current.close = lambda: None
+    asked, sent = [], []
+    monkeypatch.setattr(w, "_ask_trust", lambda sp, fp, name: asked.append((fp, name)) or True)
+    try:
+        w._trusted_then(lambda: sent.append("chime"))
+        fn, args, on_done = calls[0]
+        assert fn is app_module.read_certificate and args == ("10.0.0.9",) and not sent
+        on_done(("AA:BB", "48A6B8EEA8C0"))  # what the worker reads from the speaker
+        assert asked == [("AA:BB", "48A6B8EEA8C0")] and sent == ["chime"]
+        assert w.cfg.websocket_fingerprints == {"RINCON_48A6B8EEA8C001400": "AA:BB"}
+
+        w.current.ip = "10.0.0.10"  # the router hands out a new address
+        w._trusted_then(lambda: sent.append("chime"))
+        assert sent == ["chime", "chime"] and len(calls) == 1 and len(asked) == 1
+    finally:
+        w.mpris.unregister()
+
+
+def test_saying_no_sends_nothing_and_saves_nothing(app, monkeypatch):
+    from sonolin.gui import app as app_module
+
+    w, _jobs = _window_with_jobs(monkeypatch)
+    calls = []
+    monkeypatch.setattr(app_module.workers, "run",
+                        lambda fn, *a, on_done=None, **kw: calls.append(on_done))
+    w.current.uid, w.current.ip = "RINCON_48A6B8EEA8C001400", "10.0.0.9"
+    monkeypatch.setattr(w, "_ask_trust", lambda sp, fp, name: False)
+    sent = []
+    try:
+        w._trusted_then(lambda: sent.append("chime"))
+        calls[0](("AA:BB", "SOMETHINGELSE"))
+        assert not sent and not w.cfg.websocket_fingerprints
+    finally:
+        w.mpris.unregister()
+
+
+def test_spin_boxes_and_lists_get_their_arrows_back(app, tmp_path, monkeypatch):
+    from sonolin.gui import style
+
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+    sheet = style.sheet()
+    arrows = sorted((tmp_path / "sonolin" / "style").glob("chevron-*.svg"))
+    assert len(arrows) == 4  # up and down, normal and greyed out at the limit
+    for arrow in arrows:
+        assert arrow.as_posix() in sheet and "<path" in arrow.read_text()
+    assert "QSpinBox::up-arrow" in sheet and "QComboBox::down-arrow" in sheet
+
+
+def test_closing_hides_to_the_tray_and_quit_really_quits(app, monkeypatch):
+    from PyQt6.QtWidgets import QSystemTrayIcon
+
+    from sonolin.controller import Controller
+    from sonolin.gui.app import MainWindow
+
+    monkeypatch.setattr(QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: True))
+    monkeypatch.setattr(QSystemTrayIcon, "showMessage", lambda self, *a: hints.append(a[0]))
+    hints, saved = [], []
+    w = MainWindow(Controller([]))
+    w.timer.stop()
+    monkeypatch.setattr(w.c, "_save", lambda: saved.append(True))
+    try:
+        w.show()
+        w.close()
+        assert w.isHidden() and w.tray.isVisible() and not saved  # still running
+        assert hints == ["Sonolin is still running"]
+        w._tray_clicked(QSystemTrayIcon.ActivationReason.Trigger)
+        assert w.isVisible()
+        w.close()
+        assert hints == ["Sonolin is still running"]  # told once, not every time
+        w._show_in_tray("Night Drive", "Example Artist")
+        assert w.tray.toolTip() == "Sonolin · Night Drive · Example Artist"
+
+        monkeypatch.setattr("PyQt6.QtWidgets.QApplication.quit", lambda: None)
+        w.quit_app()
+        assert saved and not w.tray.isVisible()
+    finally:
+        w.mpris.unregister()
+        app.setQuitOnLastWindowClosed(True)
+
+
+def test_a_second_start_brings_up_the_first_copy(app):
+    from PyQt6.QtTest import QTest
+
+    from sonolin.gui import instance
+
+    name = f"sonolin-test-{id(app)}"
+    assert not instance.hand_over(name)  # nothing running yet
+    shown = []
+    server = instance.listen(lambda: shown.append(True), name)
+    try:
+        assert instance.hand_over(name)
+        QTest.qWait(100)
+        assert shown == [True]
+    finally:
+        server.close()
+
+
+def test_stop_cancels_what_is_speaking_and_greys_out_after(app, monkeypatch):
+    from PyQt6.QtTest import QTest
+
+    from sonolin.gui import app as app_module
+
+    w, _jobs = _window_with_jobs(monkeypatch)
+    runs = []
+    monkeypatch.setattr(app_module.workers, "run",
+                        lambda fn, *a, on_done=None, **kw: runs.append((fn, on_done)))
+    cancelled = []
+    w.current.cancel_announcement = lambda clip: cancelled.append(clip) or True
+    try:
+        assert not w.announce.stop_btn.isEnabled()
+        w._send_clip(lambda: None, ok="Announcement sent.")
+        runs[-1][1]({"id": "clip-1", "seconds": 0.0})  # the speaker's reply
+        assert w.announce.stop_btn.isEnabled()
+
+        w.announce.stop_btn.click()
+        fn, on_done = runs[-1]
+        assert fn() is True and cancelled == ["clip-1"]
+        assert not w.announce.stop_btn.isEnabled()
+
+        # Left alone, Stop goes grey by itself once the clip has had time to end.
+        w._send_clip(lambda: None, ok="Announcement sent.")
+        runs[-1][1]({"id": "clip-2", "seconds": 0.0})
+        w._clips_over.setInterval(10); w._clips_over.start()
+        QTest.qWait(60)
+        assert not w.announce.stop_btn.isEnabled() and w._clips == []
+    finally:
+        w.mpris.unregister()
+
+
+def test_a_burst_of_queue_changes_is_one_fetch(app, monkeypatch):
+    from PyQt6.QtTest import QTest
+
+    from sonolin.gui import app as app_module
+
+    w, _jobs = _window_with_jobs(monkeypatch)
+    fetches = []
+    monkeypatch.setattr(app_module.workers, "run",
+                        lambda fn, *a, on_done=None, **kw: fetches.append(on_done))
+    monkeypatch.setattr(w.queue, "load", lambda *a: None)
+    try:
+        for _ in range(13):  # a 200-song playlist reports a change per sixteen songs
+            w._refresh_queue()
+            QTest.qWait(20)
+        assert fetches == []  # still settling
+        QTest.qWait(w.QUEUE_SETTLE_MS + 100)
+        assert len(fetches) == 1
+
+        w._refresh_queue()  # another change while that fetch is still out
+        QTest.qWait(w.QUEUE_SETTLE_MS + 100)
+        assert len(fetches) == 1  # never two at once
+        fetches[0](([], []))  # the first one lands
+        assert len(fetches) == 2  # and the change it may have missed is fetched
+    finally:
+        w.mpris.unregister()

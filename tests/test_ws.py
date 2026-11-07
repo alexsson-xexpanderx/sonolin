@@ -158,7 +158,7 @@ def test_missing_or_invalid_pin_fails_before_connecting(pin):
 
     async def check():
         client = SonosWebSocket("127.0.0.1")
-        with pytest.raises(ConnectionError, match="verified SHA-256"):
+        with pytest.raises(ConnectionError, match="not trusted"):
             await client.command("audioClip", "loadAudioClip", streamUrl="http://private/clip")
         assert client._session is None
         assert client._ws is None
@@ -171,7 +171,7 @@ def test_pin_for_another_speaker_is_not_used(certificates):
     Config(websocket_fingerprints={"127.0.0.2": certificates[0][1]}).save()
 
     async def check():
-        with pytest.raises(ConnectionError, match="verified SHA-256"):
+        with pytest.raises(ConnectionError, match="not trusted"):
             await SonosWebSocket("127.0.0.1").connect()
 
     asyncio.run(check())
@@ -248,3 +248,25 @@ def test_caller_session_still_requires_pin(trusted_speaker, certificates):
                 assert not session.closed
 
     asyncio.run(check())
+
+
+def test_a_pin_saved_under_the_speakers_id_survives_a_new_address():
+    from sonolin.ws import pin_for
+
+    pins = {"RINCON_1": "AA", "10.0.0.5": "BB"}
+    assert pin_for(pins, "RINCON_1", "10.0.0.99") == "AA"   # moved: still found by id
+    assert pin_for(pins, "RINCON_2", "10.0.0.5") == "BB"    # older settings: by address
+    assert pin_for(pins, "", "10.0.0.7") is None
+    assert pin_for(None, "RINCON_1", "10.0.0.5") is None
+
+
+def test_the_certificate_names_its_owner():
+    from sonolin.ws import _common_name
+
+    def cn(text):
+        value = text.encode()
+        return b"\x06\x03\x55\x04\x03\x0c" + bytes([len(value)]) + value
+
+    der = b"\x30\x82" + cn("Sonos Root CA") + b"\x00\x01" + cn("48A6B8EEA8C0") + b"\x30\x00"
+    assert _common_name(der) == "48A6B8EEA8C0"  # the subject's, not the issuer's
+    assert _common_name(b"no names here") == ""

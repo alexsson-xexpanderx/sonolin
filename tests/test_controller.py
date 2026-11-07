@@ -128,3 +128,38 @@ def test_a_library_song_is_found_from_its_address(xdg, music_dir):
     assert describe_format(song) == "FLAC · 44.1 kHz · stereo"
     assert describe_format(Tags(Path("a.mp3"), channels=1, sample_rate=48000)) == \
         "MP3 · 48 kHz · mono"
+
+
+def test_a_finished_announcement_cannot_be_stopped_but_says_so(monkeypatch):
+    from sonolin.speaker import Speaker
+    from sonolin.ws import SonosWebSocketError
+
+    sp = Speaker("10.0.0.1", name="Kitchen", uid="RINCON_1")
+    answers = iter([{}, SonosWebSocketError("cancelAudioClip", "ERROR_INVALID_OBJECT_ID", "gone"),
+                    SonosWebSocketError("cancelAudioClip", "ERROR_COMMAND_FAILED", "broken")])
+
+    def reply(*a, **kw):
+        answer = next(answers)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(sp, "ws_command", reply)
+    assert sp.cancel_announcement("c1") is True     # stopped mid-way
+    assert sp.cancel_announcement("c1") is False    # had already finished
+    with pytest.raises(SonosWebSocketError):
+        sp.cancel_announcement("c1")                # a real failure still shows
+
+
+def test_speech_length_is_read_from_the_recording():
+    import io
+    import wave
+
+    from sonolin.controller import wav_seconds
+
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1); w.setsampwidth(2); w.setframerate(22050)
+        w.writeframes(bytes(2 * 22050 * 3))  # three seconds of silence
+    assert wav_seconds(buf.getvalue()) == 3.0
+    assert wav_seconds(b"not a recording") == 0.0
